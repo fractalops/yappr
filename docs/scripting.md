@@ -4,7 +4,7 @@ Yappr appends entries and checks question decisions. It never executes the actio
 These rules define the scripting interface.
 
 **stdout carries data only.** `post` prints the new entry id. `follow` prints
-entries. `id`, `ticket` and `devices` print their values. All status messages,
+entries. `id` and `ticket` print their values. All status messages,
 warnings and errors go to stderr.
 
 **Text is for people. JSON is for programs.** When stdout is a terminal,
@@ -17,7 +17,7 @@ format does not depend on where the output goes.
 |---|---|---|
 | `follow` | text, one line for each one-line entry | JSON, one entry per line |
 | `questions`, `health` | text | JSON, one object per line |
-| `devices` | a table with short IDs | tab-separated lines with full IDs |
+| `status` | text | one JSON object |
 | `post`, `ask`, `answer`, `id`, `ticket` | one value | the same value |
 
 `--output text`, `--output json` and, for `follow`, `--output raw` select a
@@ -128,9 +128,16 @@ Ordinary feed readers can ignore this field.
 
 ## Pairing
 
-Start `yappr serve` before you run `yappr pair`.
-The pairing command prints the invitation to stdout. It prints status to stderr.
+`yappr init` starts serving, pairs one device, and keeps serving.
+`yappr pair` pairs one device while `yappr serve` runs in another process.
+Both print the pairing code to stdout and status to stderr.
+When stderr is a terminal, they also draw the code as a QR code there.
 Use `--expires DURATION` to change the five-minute invitation lifetime.
+Use `--name NAME` to set the writer name that the joining device shows. The default is the host name.
+
+A pairing code starts with `YAPPR:`, followed by capital letters and digits.
+It holds the token, the deadline, the writer name, and the writer's ticket.
+Letter case does not matter when you type it.
 
 An invitation carries a random token and the writer's endpoint ticket.
 The first authenticated device that presents the token claims the invitation.
@@ -146,8 +153,13 @@ yappr pair --reject DEVICE_ID
 ```
 
 The `--accept` and `--reject` commands must use the same feed directory as the invitation.
-`yappr join INVITATION --name NAME` requests access from another CLI device.
+After the writer accepts a device, it saves an alias from the device name, for example `my-phone`.
+If another device has that alias, a number follows it, for example `my-phone-2`.
+Use `--alias NAME` to choose the alias.
+
+`yappr join CODE --name NAME` requests access from another CLI device.
 It prints the writer's ticket after the writer accepts the device.
+The device that claimed an invitation can read the answer for two minutes after the deadline.
 
 ## Several writers
 
@@ -179,11 +191,11 @@ After the replay, the cursor moves past every entry that the writer checked, als
 
 ## Devices and access
 
-`yappr devices` prints one device per line: alias, endpoint ID, and `yes` or `no`.
-The last column tells if the device can read this machine's feed.
-It says nothing about access to that device's feed.
-Allowed devices without an alias show `-` as the alias.
-A terminal gets a header and short IDs. A pipe gets tab-separated full IDs.
+`yappr status` shows this machine's endpoint ID, its feed, its peers, its questions, and its outbox.
+A peer is a device with an alias, or a device that can read this feed.
+The "reads this feed" column tells if the peer is in this machine's allow list.
+It says nothing about access to that peer's feed.
+In a pipe, `status` prints one JSON object with the fields `endpoint`, `feed`, `peers`, `questions`, and `outbox`.
 
 `yappr alias set NAME ID_OR_TICKET` saves a local name. An alias does not grant access.
 Save a ticket when the alias needs explicit addresses. An ID alone depends on address discovery.

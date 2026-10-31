@@ -30,6 +30,7 @@ dirs = "7.0.0"
 gethostname = "1.1.0"
 iroh-mdns-address-lookup = "0.6.1"
 libc = "0.2"
+qrcode = { version = "0.14.1", default-features = false }
 tokio = { version = "1.54.1", features = ["full"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

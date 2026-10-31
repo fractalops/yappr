@@ -488,6 +488,67 @@ fn not_kind_hides_a_kind_and_moves_the_cursor_past_it() {
 }
 
 #[test]
+fn init_serves_pairs_one_device_and_keeps_serving() {
+    let writer = Machine::new();
+    let device = Machine::new();
+    let mut init = writer
+        .command(&["init", "--name", "Test writer"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    read_ticket(init.stderr.take().unwrap());
+    let mut code = String::new();
+    BufReader::new(init.stdout.take().unwrap())
+        .read_line(&mut code)
+        .unwrap();
+    let code = code.trim().to_string();
+    assert!(code.starts_with("YAPPR:"), "{code}");
+    let join = device
+        .command(&["join", &code, "--name", "Test device", "--alias", "writer"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // The writer has no terminal, so another command accepts the device.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while writer.exit(["pair", "--accept", &device.id()], b"").0 != 0 {
+        assert!(std::time::Instant::now() < deadline, "no pairing request");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let joined = join.wait_with_output().unwrap();
+    assert!(joined.status.success());
+    // init saves an alias from the device name, and it still serves.
+    let row = format!("test-device\t{}\tyes", device.id());
+    while !writer.run(["devices"]).lines().any(|l| l == row) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no alias for the device"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    writer.post("hello", &[]);
+    let got = device.run(["follow", "writer", "--no-follow", "--output", "json"]);
+    assert!(got.contains("\"body\":\"hello\""), "{got}");
+    init.kill().ok();
+    init.wait().ok();
+}
+
+#[test]
+fn status_reports_peers_and_questions_as_json_in_a_pipe() {
+    let (writer, device) = pair();
+    writer.run(["alias", "set", "phone", &device.id()]);
+    writer.run(["approve", "phone", "Deploy?", "--no-wait"]);
+    let status: serde_json::Value = serde_json::from_str(&writer.run(["status"])).unwrap();
+    assert_eq!(status["endpoint"], writer.id());
+    assert_eq!(status["peers"][0]["alias"], "phone");
+    assert_eq!(status["peers"][0]["reads"], true);
+    assert_eq!(status["questions"]["pending"], 1);
+    assert_eq!(status["outbox"]["queued"], 0);
+}
+
+#[test]
 fn disallowed_follower_gets_nothing() {
     let writer = Machine::new();
     let stranger = Machine::new();

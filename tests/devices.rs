@@ -38,3 +38,29 @@ fn corrupt_alias_ticket_cannot_redirect_a_request() {
     disk::write(&dir.path().join("peers.json"), &serde_json::json!({"device": {"id": SecretKey::generate().public(), "ticket": ticket().to_string()}})).unwrap();
     assert!(peers::resolve(dir.path(), "device").is_err());
 }
+
+#[test]
+fn an_alias_comes_from_the_device_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let phone = SecretKey::generate().public();
+    let other = SecretKey::generate().public();
+    assert_eq!(
+        peers::alias_for(dir.path(), "My phone", phone).unwrap(),
+        "my-phone"
+    );
+    peers::set(dir.path(), "my-phone", &phone.to_string()).unwrap();
+    // The same device keeps its alias. Another device gets a number.
+    assert_eq!(
+        peers::alias_for(dir.path(), "Phone 2", phone).unwrap(),
+        "my-phone"
+    );
+    assert_eq!(
+        peers::alias_for(dir.path(), "My phone!", other).unwrap(),
+        "my-phone-2"
+    );
+    assert_eq!(
+        peers::alias_for(dir.path(), "42", other).unwrap(),
+        "device-42"
+    );
+    assert_eq!(peers::alias_for(dir.path(), "✨", other).unwrap(), "device");
+}

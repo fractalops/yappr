@@ -27,6 +27,41 @@ pub fn validate_alias(alias: &str) -> Result<()> {
     Ok(())
 }
 
+/// The longest alias that [`alias_for`] makes, before a number.
+const MAX_DERIVED: usize = 40;
+
+/// An alias for the device `id`, made from its name. "My phone" gives
+/// "my-phone". An alias that already names `id` is used again. When another
+/// device has the alias, a number follows it: "my-phone-2".
+pub fn alias_for(dir: &Path, name: &str, id: EndpointId) -> Result<String> {
+    let peers = list(dir)?;
+    if let Some((alias, _)) = peers.iter().find(|(_, peer)| peer.id == id) {
+        return Ok(alias.clone());
+    }
+    let mut base = String::new();
+    for c in name.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            base.push(c);
+        } else if !base.is_empty() && !base.ends_with('-') {
+            base.push('-');
+        }
+    }
+    base.truncate(MAX_DERIVED);
+    let base = base.trim_end_matches('-');
+    let base = match base.chars().next() {
+        Some(c) if c.is_ascii_lowercase() => base.to_string(),
+        Some(_) => format!("device-{base}"),
+        None => "device".to_string(),
+    };
+    (1..)
+        .map(|n| match n {
+            1 => base.clone(),
+            n => format!("{base}-{n}"),
+        })
+        .find(|alias| !peers.contains_key(alias) && validate_alias(alias).is_ok())
+        .context("no free alias")
+}
+
 pub fn list(dir: &Path) -> Result<BTreeMap<String, Peer>> {
     disk::read(&dir.join("peers.json"))
 }

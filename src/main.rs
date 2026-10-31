@@ -91,6 +91,15 @@ enum Commands {
   yappr follow laptop --output json | jq -c 'select(.kind == \"alert\")' | yappr post --json")]
     Post(PostArgs),
 
+    /// Serve the feed, pair one device, and keep serving.
+    ///
+    /// Use it on the writer the first time. Later, start the writer with
+    /// serve, and pair more devices with pair.
+    #[clap(after_help = "Examples:
+  yappr init
+  yappr init --name \"Work laptop\"")]
+    Init(InitArgs),
+
     /// Serve the local feed to the allowed followers.
     ///
     /// Prints the ticket on stderr.
@@ -164,10 +173,19 @@ enum Commands {
         #[clap(long = "choice", value_name = "VALUE")]
         value: String,
     },
-    /// Print your devices: aliases, IDs, and access to this feed.
+    /// Print this machine's identity, feed, peers, questions, and outbox.
     ///
-    /// "reads this feed" means the device is in this machine's allow list.
-    /// It says nothing about access to that device's feed.
+    /// "reads this feed" means the peer is in this machine's allow list. It
+    /// says nothing about access to that peer's feed.
+    Status {
+        /// The output format. The default is text for a terminal and JSON for
+        /// a pipe or a file.
+        #[clap(long, value_enum)]
+        output: Option<Format>,
+    },
+    /// Print aliases, IDs, and access to this feed as tab-separated lines.
+    /// `status` replaces it.
+    #[clap(hide = true)]
     Devices,
     /// Send queued choices again.
     Retry,
@@ -190,9 +208,9 @@ enum Commands {
         #[clap(long, value_enum)]
         output: Option<Format>,
     },
-    /// Pair a device with an expiring invitation.
+    /// Pair a device with an expiring invitation while serve runs.
     #[clap(after_help = "Examples:
-  yappr pair --alias laptop
+  yappr pair
   yappr pair --accept <ID>    (confirm from another terminal)")]
     Pair(PairArgs),
     /// Join a pairing invitation from another writer.
@@ -308,14 +326,34 @@ struct ApprovalArgs {
     question: QuestionArgs,
 }
 #[derive(clap::Args, Debug)]
-struct PairArgs {
-    /// The writer name shown on the joining device.
-    #[clap(long, default_value = "My computer")]
-    name: String,
+struct InitArgs {
+    /// The writer name shown on the joining device. The default is the host
+    /// name.
+    #[clap(long)]
+    name: Option<String>,
+    /// Save the accepted device under this alias. The default comes from the
+    /// device's name.
+    #[clap(long)]
+    alias: Option<String>,
     /// The invitation lifetime.
     #[clap(long, value_parser = parse_interval, default_value = "5m")]
     expires: Duration,
-    /// Save the accepted device under this local alias.
+    /// The UDP port for IPv4. See serve --port.
+    #[clap(long)]
+    port: Option<u16>,
+}
+
+#[derive(clap::Args, Debug)]
+struct PairArgs {
+    /// The writer name shown on the joining device. The default is the host
+    /// name.
+    #[clap(long)]
+    name: Option<String>,
+    /// The invitation lifetime.
+    #[clap(long, value_parser = parse_interval, default_value = "5m")]
+    expires: Duration,
+    /// Save the accepted device under this alias. The default comes from the
+    /// device's name.
     #[clap(long)]
     alias: Option<String>,
     /// Confirm a pending device by its full endpoint ID.
@@ -591,8 +629,22 @@ fn short_ticket(addr: &EndpointAddr) -> EndpointTicket {
 }
 
 async fn serve(common: &CommonArgs, args: ServeArgs) -> Result<()> {
+    let (_store, server, _ticket) = start_serving(common, args.port, true).await?;
+    tokio::signal::ctrl_c().await?;
+    eprintln!("got ctrl-c, exiting");
+    server.shutdown().await;
+    Ok(())
+}
+
+/// Start the server, save its ticket, and print how to follow it. With
+/// `pair_hint`, a feed that no device can read gets a hint to run pair.
+async fn start_serving(
+    common: &CommonArgs,
+    port: Option<u16>,
+    pair_hint: bool,
+) -> Result<(Store, Server, EndpointTicket)> {
     let store = common.store()?;
-    let opts = common.net(args.port)?;
+    let opts = common.net(port)?;
     let wait_for_relay = opts.network == Network::Default && !opts.relays.disabled;
     let server = Server::spawn(store.clone(), common.secret()?, opts).await?;
     if wait_for_relay
@@ -617,15 +669,36 @@ async fn serve(common: &CommonArgs, args: ServeArgs) -> Result<()> {
         store.dir().display(),
         store.last_id()?
     );
-    if allowed == 0 {
+    if allowed == 0 && pair_hint {
         eprintln!(
-            "No follower can read this feed yet. On each follower, run \"yappr id\". \
-             Then run \"yappr allow <id>\" on this machine."
+            "No follower can read this feed yet. To pair a device, run \"yappr pair\" \
+             in another terminal."
         );
     }
     eprintln!("To follow, use:\nyappr follow {ticket}");
     eprintln!("or, with the endpoint id only:\nyappr follow {short}");
+    Ok((store, server, ticket))
+}
 
+async fn init(common: &CommonArgs, args: InitArgs) -> Result<()> {
+    if let Some(alias) = &args.alias {
+        peers::validate_alias(alias)?;
+    }
+    let (store, server, ticket) = start_serving(common, args.port, false).await?;
+    let name = args.name.unwrap_or_else(hostname);
+    let outcome =
+        pairing_session(&store, ticket.to_string(), name, args.expires, args.alias).await?;
+    match outcome {
+        PairOutcome::Interrupted => {
+            server.shutdown().await;
+            return Ok(());
+        }
+        PairOutcome::Expired => {
+            eprintln!("The invitation expired. To pair a device, run \"yappr pair\".")
+        }
+        PairOutcome::Accepted | PairOutcome::Rejected => {}
+    }
+    eprintln!("Serving. Press Ctrl-C to stop. Next time, start the writer with \"yappr serve\".");
     tokio::signal::ctrl_c().await?;
     eprintln!("got ctrl-c, exiting");
     server.shutdown().await;
@@ -925,6 +998,80 @@ fn deny(common: &CommonArgs, target: String) -> Result<()> {
     Ok(())
 }
 
+/// This machine at a glance: identity, feed, peers, questions, and outbox.
+fn status(common: &CommonArgs, text: bool) -> Result<()> {
+    let store = common.store()?;
+    let id = common.secret()?.public();
+    let allowed = store.allow_list().load()?;
+    let mut peers = Vec::new();
+    let mut named = std::collections::BTreeSet::new();
+    for (alias, peer) in peers::list(store.dir())? {
+        peers.push((Some(alias), peer.id, allowed.contains(&peer.id)));
+        named.insert(peer.id);
+    }
+    peers.extend(
+        allowed
+            .iter()
+            .filter(|id| !named.contains(*id))
+            .map(|id| (None, *id, true)),
+    );
+    let mut questions = std::collections::BTreeMap::<String, u64>::new();
+    for state in choices::list(&store.entries()?) {
+        *questions.entry(state.status).or_default() += 1;
+    }
+    let queued = yappr::outbox::list(store.dir())?
+        .iter()
+        .filter(|d| d.status == "queued")
+        .count();
+    if !text {
+        let peers: Vec<_> = peers
+            .iter()
+            .map(|(alias, id, reads)| serde_json::json!({"alias": alias, "id": id, "reads": reads}))
+            .collect();
+        let json = serde_json::json!({
+            "endpoint": id,
+            "feed": {"dir": store.dir(), "entries": store.last_id()?},
+            "peers": peers,
+            "questions": questions,
+            "outbox": {"queued": queued},
+        });
+        println!("{json}");
+        return Ok(());
+    }
+    println!("endpoint   {id}");
+    println!(
+        "feed       {} ({} entries)",
+        store.dir().display(),
+        store.last_id()?
+    );
+    println!();
+    if peers.is_empty() {
+        println!("peers      none. Run \"yappr init\" or \"yappr pair\" to pair a device.");
+    } else {
+        println!("peers                            reads this feed");
+        for (alias, id, reads) in &peers {
+            let alias = alias.as_deref().unwrap_or("-");
+            let reads = if *reads { "yes" } else { "no" };
+            println!("  {alias:<16} {:<14} {reads}", id.fmt_short());
+        }
+    }
+    println!();
+    let counts: Vec<String> = questions
+        .iter()
+        .map(|(status, n)| format!("{n} {status}"))
+        .collect();
+    match counts.is_empty() {
+        true => println!("questions  none"),
+        false => println!("questions  {}", counts.join(", ")),
+    }
+    match queued {
+        0 => println!("outbox     no answers wait"),
+        1 => println!("outbox     1 answer waits. Run \"yappr retry\"."),
+        n => println!("outbox     {n} answers wait. Run \"yappr retry\"."),
+    }
+    Ok(())
+}
+
 /// Aliases and allowed IDs in one list. A terminal gets a header and short
 /// IDs. A pipe gets full IDs, one tab-separated device per line.
 fn devices(common: &CommonArgs) -> Result<()> {
@@ -1134,65 +1281,161 @@ async fn pair(common: &CommonArgs, args: PairArgs) -> Result<()> {
     }
     let ticket: Option<String> = disk::read(&store.dir().join("endpoint.json"))?;
     let ticket = ticket.context("start yappr serve before you create an invitation")?;
-    let expires_at = Timestamp::now().checked_add(jiff::SignedDuration::try_from(args.expires)?)?;
-    let invitation = pairing::create(&store, ticket, args.name, expires_at)?;
+    let name = args.name.unwrap_or_else(hostname);
+    match pairing_session(&store, ticket, name, args.expires, args.alias).await? {
+        PairOutcome::Expired => bail!("the pairing invitation expired"),
+        _ => Ok(()),
+    }
+}
+
+/// How a pairing session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairOutcome {
+    Accepted,
+    Rejected,
+    Expired,
+    /// Ctrl-C. The invitation is revoked.
+    Interrupted,
+}
+
+/// Create an invitation, show it as text and as a QR code, and wait for one
+/// device. A terminal asks to accept the device. Without a terminal, the
+/// writer accepts with "pair --accept".
+async fn pairing_session(
+    store: &Store,
+    ticket: String,
+    name: String,
+    lifetime: Duration,
+    alias: Option<String>,
+) -> Result<PairOutcome> {
+    let expires_at = Timestamp::now().checked_add(jiff::SignedDuration::try_from(lifetime)?)?;
+    let invitation = pairing::create(store, ticket, name, expires_at)?;
     let text = invitation.encode()?;
     println!("{text}");
     io::stdout().flush()?;
-    eprintln!("On the other device, run: yappr join '{text}'");
+    print_qr(&text)?;
+    eprintln!("Scan the code with the Yappr app, or on another computer run:");
+    eprintln!("yappr join {text}");
     eprintln!("The invitation expires at {expires_at}.");
+    let interrupted = || -> Result<PairOutcome> {
+        pairing::revoke(store.dir(), &invitation.token)?;
+        Ok(PairOutcome::Interrupted)
+    };
+    let mut asked = false;
     loop {
         let offer = pairing::get(store.dir(), &invitation.token)?;
-        if offer.status != "pending" {
-            if offer.status == "accepted" {
-                if let (Some(alias), Some(candidate)) = (&args.alias, &offer.candidate) {
-                    peers::set(store.dir(), alias, &candidate.id.to_string())?;
-                }
+        match offer.status.as_str() {
+            "accepted" => {
+                let candidate = offer.candidate.context("the accepted device is missing")?;
+                let alias = match &alias {
+                    Some(alias) => alias.clone(),
+                    None => peers::alias_for(store.dir(), &candidate.name, candidate.id)?,
+                };
+                peers::set(store.dir(), &alias, &candidate.id.to_string())?;
+                eprintln!("Paired. The device is \"{alias}\" on this machine.");
+                return Ok(PairOutcome::Accepted);
             }
-            eprintln!("Pairing {}.", offer.status);
-            return Ok(());
+            "rejected" => {
+                eprintln!("Pairing rejected.");
+                return Ok(PairOutcome::Rejected);
+            }
+            _ => {}
         }
         if Timestamp::now() >= expires_at {
             pairing::revoke(store.dir(), &invitation.token)?;
-            bail!("the pairing invitation expired");
+            return Ok(PairOutcome::Expired);
         }
-        if let Some(candidate) = offer.candidate {
-            eprintln!("Device: {}\nID: {}", candidate.name, candidate.id);
+        if let (Some(candidate), false) = (offer.candidate, asked) {
+            asked = true;
+            eprintln!(
+                "Device: {}\nID: {}",
+                yappr::proto::printable(&candidate.name),
+                candidate.id
+            );
             if io::stdin().is_terminal() {
                 eprintln!("Allow this device? [y/N]");
-                let mut answer = String::new();
-                io::stdin().read_line(&mut answer)?;
+                let answer = tokio::select! {
+                    line = read_stdin_line() => line?,
+                    _ = tokio::signal::ctrl_c() => return interrupted(),
+                };
                 let accept = matches!(answer.trim().to_lowercase().as_str(), "y" | "yes");
-                if accept {
-                    if let Some(alias) = &args.alias {
-                        peers::set(store.dir(), alias, &candidate.id.to_string())?;
-                    }
-                }
-                pairing::confirm(&store, candidate.id, accept)?;
-            } else {
-                eprintln!(
-                    "Confirm this device in another terminal: yappr pair --accept {}",
-                    candidate.id
-                );
-                // Print the instruction once. Keep the invitation active.
-                while pairing::get(store.dir(), &invitation.token)?.status == "pending"
-                    && Timestamp::now() < expires_at
-                {
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_millis(300)) => {},
-                        _ = tokio::signal::ctrl_c() => {
-                            pairing::revoke(store.dir(), &invitation.token)?;
-                            return Ok(());
-                        }
-                    }
-                }
+                pairing::confirm(store, candidate.id, accept)?;
+                continue;
             }
+            eprintln!(
+                "Confirm this device in another terminal: yappr pair --accept {}",
+                candidate.id
+            );
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(300)) => {},
-            _ = tokio::signal::ctrl_c() => { pairing::revoke(store.dir(), &invitation.token)?; return Ok(()); }
+            _ = tokio::signal::ctrl_c() => return interrupted(),
         }
     }
+}
+
+/// One line from stdin, read on a blocking thread so Ctrl-C still works.
+async fn read_stdin_line() -> Result<String> {
+    tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        anyhow::Ok(line)
+    })
+    .await?
+}
+
+/// Draw `text` as a QR code on stderr when stderr is a terminal. Each text
+/// row holds two module rows in half blocks. Black modules on a white field
+/// scan best, so the colors are set and do not follow the terminal theme.
+fn print_qr(text: &str) -> Result<()> {
+    if !io::stderr().is_terminal() {
+        return Ok(());
+    }
+    let code = qrcode::QrCode::new(text.as_bytes())?;
+    let width = code.width() as isize;
+    let colors = code.to_colors();
+    let dark = |x: isize, y: isize| {
+        (0..width).contains(&x)
+            && (0..width).contains(&y)
+            && colors[(y * width + x) as usize] == qrcode::Color::Dark
+    };
+    let color = render::use_color(
+        ColorChoice::Auto,
+        true,
+        std::env::var("NO_COLOR").ok().as_deref(),
+    );
+    // A quiet zone of two modules on each side.
+    const QUIET: isize = 2;
+    let mut out = String::new();
+    let mut y = -QUIET;
+    while y < width + QUIET {
+        if color {
+            out.push_str("\x1b[30;107m");
+        }
+        for x in -QUIET..width + QUIET {
+            let (top, bottom) = (dark(x, y), dark(x, y + 1));
+            // Without color, the blocks draw the light modules: a dark
+            // terminal then shows dark modules on a light field.
+            let (top, bottom) = if color {
+                (top, bottom)
+            } else {
+                (!top, !bottom)
+            };
+            out.push(match (top, bottom) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
+        }
+        if color {
+            out.push_str("\x1b[0m");
+        }
+        out.push('\n');
+        y += 2;
+    }
+    eprint!("{out}");
+    Ok(())
 }
 
 async fn join(common: &CommonArgs, text: &str, name: String, alias: Option<String>) -> Result<()> {
@@ -1265,6 +1508,7 @@ async fn run(args: Args) -> Result<()> {
     match args.command {
         Commands::Post(args) => post(common, args).await,
         Commands::Serve(args) => serve(common, args).await,
+        Commands::Init(args) => init(common, args).await,
         Commands::Follow(args) => {
             tokio::select! {
                 res = follow(common, args) => res,
@@ -1311,6 +1555,7 @@ async fn run(args: Args) -> Result<()> {
         Commands::Wait { id } => wait(common, &id).await,
         Commands::Cancel { id } => choices::cancel(&common.store()?, &id),
         Commands::Devices => devices(common),
+        Commands::Status { output } => status(common, Format::is_text(output)),
         Commands::Answer { ticket, id, value } => {
             let ticket = EndpointTicket::new(peers::resolve(&common.dir()?, &ticket)?);
             answer(common, ticket, id, value).await

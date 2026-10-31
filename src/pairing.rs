@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::EndpointTicket;
 #[cfg(not(wasm_browser))]
 use crate::{disk, store::Store};
+use iroh_tickets::Ticket;
 
 pub const ALPN: &[u8] = b"pair/0";
 
@@ -34,28 +35,75 @@ pub struct Invitation {
     pub name: String,
     pub expires_at: Timestamp,
 }
+/// The start of a pairing code. A code uses only capital letters, digits, and
+/// a colon, so a QR code can store it in its compact alphanumeric mode.
+const CODE_PREFIX: &str = "YAPPR:";
+/// The version of the binary layout inside a pairing code.
+const CODE_VERSION: u8 = 1;
+/// The longest writer name in a pairing code, in bytes.
+const MAX_NAME: usize = 64;
+
 impl Invitation {
+    /// The pairing code: `YAPPR:` and the base32 of this layout:
+    /// version (1 byte), token (32 bytes), deadline in Unix seconds (8 bytes,
+    /// big endian), name length (1 byte), name, ticket bytes.
     pub fn encode(&self) -> Result<String> {
+        let ticket: EndpointTicket = self.ticket.parse()?;
+        let token = data_encoding::HEXLOWER.decode(self.token.as_bytes())?;
+        if token.len() != 32 {
+            bail!("the pairing token is not valid");
+        }
+        if self.name.len() > MAX_NAME {
+            bail!("the writer name is longer than {MAX_NAME} bytes");
+        }
+        let mut bytes = vec![CODE_VERSION];
+        bytes.extend(token);
+        bytes.extend(self.expires_at.as_second().to_be_bytes());
+        bytes.push(self.name.len() as u8);
+        bytes.extend(self.name.as_bytes());
+        bytes.extend(ticket.encode_bytes());
         Ok(format!(
-            "yappr://pair/{}",
-            data_encoding::BASE64URL_NOPAD.encode(&serde_json::to_vec(self)?)
+            "{CODE_PREFIX}{}",
+            data_encoding::BASE32_NOPAD.encode(&bytes)
         ))
     }
+
     pub fn decode(text: &str) -> Result<Self> {
         if text.len() > 8192 {
             bail!("the pairing code is too long");
         }
+        // A person can type the code in lower case.
+        let text = text.trim().to_ascii_uppercase();
         let encoded = text
-            .trim()
-            .strip_prefix("yappr://pair/")
-            .context("use a Yappr pairing code")?;
-        let value: Self =
-            serde_json::from_slice(&data_encoding::BASE64URL_NOPAD.decode(encoded.as_bytes())?)?;
-        value.ticket.parse::<EndpointTicket>()?;
-        if !crate::choices::valid_id(&value.token) {
-            bail!("the pairing token is not valid");
+            .strip_prefix(CODE_PREFIX)
+            .context("use a Yappr pairing code. It starts with YAPPR:")?;
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(encoded.as_bytes())
+            .context("the pairing code is not valid")?;
+        let invalid = || anyhow::anyhow!("the pairing code is not valid");
+        let (&version, rest) = bytes.split_first().ok_or_else(invalid)?;
+        if version != CODE_VERSION {
+            bail!("the pairing code has version {version}. Update Yappr to read it");
         }
-        Ok(value)
+        let (token, rest) = rest.split_at_checked(32).ok_or_else(invalid)?;
+        let (seconds, rest) = rest.split_at_checked(8).ok_or_else(invalid)?;
+        let (&name_len, rest) = rest.split_first().ok_or_else(invalid)?;
+        let (name, ticket) = rest
+            .split_at_checked(name_len as usize)
+            .ok_or_else(invalid)?;
+        let name = String::from_utf8(name.to_vec()).map_err(|_| invalid())?;
+        if name.len() > MAX_NAME || name.chars().any(char::is_control) {
+            return Err(invalid());
+        }
+        let seconds = i64::from_be_bytes(seconds.try_into().map_err(|_| invalid())?);
+        Ok(Self {
+            ticket: EndpointTicket::decode_bytes(ticket)
+                .map_err(|_| invalid())?
+                .to_string(),
+            token: data_encoding::HEXLOWER.encode(token),
+            name,
+            expires_at: Timestamp::from_second(seconds).map_err(|_| invalid())?,
+        })
     }
 }
 
@@ -256,4 +304,55 @@ pub fn revoke(dir: &Path, token: &str) -> Result<()> {
         }
     }
     disk::write(&path, &offers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn invitation() -> Invitation {
+        let id = iroh::SecretKey::generate().public();
+        let addr = iroh::EndpointAddr::new(id)
+            .with_relay_url("https://euc1-1.relay.n0.iroh.link./".parse().unwrap())
+            .with_ip_addr("192.168.1.20:4919".parse().unwrap());
+        Invitation {
+            ticket: EndpointTicket::new(addr).to_string(),
+            token: crate::choices::random_id(),
+            name: "Work laptop".into(),
+            expires_at: Timestamp::from_second(1_800_000_000).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_code_round_trips_in_any_case() {
+        let i = invitation();
+        let code = i.encode().unwrap();
+        assert!(code.starts_with("YAPPR:"));
+        // Capital letters, digits, and a colon: the QR alphanumeric mode.
+        assert!(code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b':'));
+        for text in [code.clone(), code.to_lowercase(), format!("  {code}\n")] {
+            let back = Invitation::decode(&text).unwrap();
+            assert_eq!(back.ticket, i.ticket);
+            assert_eq!(back.token, i.token);
+            assert_eq!(back.name, i.name);
+            assert_eq!(back.expires_at, i.expires_at);
+        }
+    }
+
+    #[test]
+    fn a_code_is_short() {
+        let code = invitation().encode().unwrap();
+        assert!(code.len() < 300, "{} characters", code.len());
+    }
+
+    #[test]
+    fn a_damaged_code_is_an_error() {
+        let code = invitation().encode().unwrap();
+        assert!(Invitation::decode(&code[..code.len() - 10]).is_err());
+        assert!(Invitation::decode("YAPPR:AAAA").is_err());
+        assert!(Invitation::decode("yappr://pair/eyJ0aWNrZXQiOiJ").is_err());
+        assert!(Invitation::decode("hello").is_err());
+    }
 }

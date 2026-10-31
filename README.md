@@ -1,10 +1,16 @@
 # Yappr
 
-Your machines post to you. Some of them wait for your answer.
+Yappr sends you updates and questions from your own machines.
 
-One machine writes a private, append-only feed. Your other computers read it
-over iroh, from anywhere. A script can ask a question and wait until you
-answer on another computer. There is no account and no hosted service.
+A program on one machine posts entries to a feed, and your other devices read
+them. A script can also ask you a question and wait until you answer from
+another device. The feed keeps every entry, so a device that was offline
+catches up when it connects again.
+
+Yappr connects your devices directly with iroh. When a direct connection is
+not possible, for example behind a strict firewall, the traffic goes through a
+relay. The relay passes on encrypted data and cannot read it. You do not need
+an account, and no Yappr server sits between your devices.
 
 ```sh
 df -h / | yappr post --source disk --title "Disk usage"
@@ -21,26 +27,25 @@ cargo install --git https://github.com/fractalops/yappr
 
 In this example, `server` writes the feed and `laptop` reads it.
 
-On the server, start the feed:
+On the server, start the feed and pair your first device:
 
 ```sh
-yappr serve
+yappr init
 ```
 
-In a second terminal on the server, create a pairing code for the laptop:
+The server shows a QR code and a pairing code that starts with `YAPPR:`. On a
+phone, scan the QR code with the browser app at [yappr.run](https://yappr.run).
+On the laptop, join with the pairing code:
 
 ```sh
-yappr pair --alias laptop
+yappr join YAPPR:... --name laptop --alias server
 ```
 
-On the laptop, join with that code:
-
-```sh
-yappr join 'yappr://pair/...' --name laptop --alias server
-```
-
-Compare the laptop's device ID with the ID on the server. Then enter `y` on
-the server.
+The server shows the name and the ID of the new device. Check that the ID
+matches the ID on the device, then enter `y`. The server saves an alias from
+the device name, for example `laptop`, and keeps serving. Next time, start the
+server with `yappr serve`. To pair more devices, run `yappr pair` in a second
+terminal.
 
 On the laptop, follow the feed:
 
@@ -120,7 +125,7 @@ a connection failure or sleep, it continues from where it stopped.
 ## Devices and access
 
 ```sh
-yappr devices          # aliases, IDs, and which devices can read this feed
+yappr status           # this machine, its peers, and open questions
 yappr allow laptop
 yappr deny laptop
 yappr health server    # connection state, path, and round-trip time

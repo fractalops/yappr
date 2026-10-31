@@ -43,6 +43,11 @@ impl Cursor {
         }
     }
 
+    /// True if a value was saved before.
+    pub fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
     /// Replace the saved value. A unique temporary file and a rename make the
     /// change atomic. Other cursor names use other files.
     pub fn save(&self, id: u64) -> Result<()> {

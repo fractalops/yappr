@@ -6,6 +6,8 @@ use iroh::EndpointId;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(wasm_browser))]
+use crate::entry::Details;
 use crate::entry::{Draft, Entry};
 #[cfg(not(wasm_browser))]
 use crate::store::Store;
@@ -95,8 +97,12 @@ fn draft(record: Record, title: String, body: String, source: String, kind: &str
     Ok(Draft {
         source,
         kind: kind.into(),
+        level: None,
+        subject: None,
         title: Some(title),
         body,
+        format: None,
+        data: None,
         extra,
     })
 }
@@ -139,8 +145,12 @@ impl Question {
         Draft {
             source: self.source.clone(),
             kind: "question".into(),
+            level: None,
+            subject: None,
             title: Some(self.title.clone()),
             body: self.body.clone(),
+            format: None,
+            data: None,
             extra: Default::default(),
         }
         .validate()?;
@@ -176,6 +186,12 @@ pub fn approval_options() -> Vec<Choice> {
 
 #[cfg(not(wasm_browser))]
 pub fn create(store: &Store, question: Question) -> Result<Question> {
+    create_with(store, question, Details::default())
+}
+
+/// Create a question. Its entry also gets the optional `details`.
+#[cfg(not(wasm_browser))]
+pub fn create_with(store: &Store, question: Question, details: Details) -> Result<Question> {
     question.validate()?;
     if question.expires_at.is_some_and(|t| t <= Timestamp::now()) {
         bail!("the deadline must be in the future");
@@ -187,7 +203,7 @@ pub fn create(store: &Store, question: Question) -> Result<Question> {
         ) {
             bail!("question ID already exists");
         }
-        let entry = draft(
+        let mut entry = draft(
             Record::Question {
                 question: question.clone(),
             },
@@ -196,6 +212,11 @@ pub fn create(store: &Store, question: Question) -> Result<Question> {
             question.source.clone(),
             "question",
         )?;
+        entry.level = details.level;
+        entry.subject = details.subject;
+        entry.format = details.format;
+        entry.data = details.data;
+        entry.validate()?;
         Ok((Some(entry), result))
     })
 }

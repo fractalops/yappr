@@ -94,8 +94,12 @@ impl Store {
             time: Timestamp::now(),
             source: draft.source,
             kind: draft.kind,
+            level: draft.level,
+            subject: draft.subject,
             title: draft.title,
             body: draft.body,
+            format: draft.format,
+            data: draft.data,
             extra: draft.extra,
         };
         let mut line = serde_json::to_vec(&entry)?;
@@ -303,6 +307,10 @@ mod tests {
         Draft {
             source: "test".into(),
             kind: "info".into(),
+            level: None,
+            subject: None,
+            format: None,
+            data: None,
             title: None,
             body: body.into(),
             extra: Default::default(),

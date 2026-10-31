@@ -30,6 +30,10 @@ fn draft(body: &str) -> Draft {
     Draft {
         source: "review".into(),
         kind: "info".into(),
+        level: None,
+        subject: None,
+        format: None,
+        data: None,
         title: None,
         body: body.into(),
         extra: Default::default(),

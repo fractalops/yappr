@@ -62,6 +62,21 @@ pub struct Request {
     /// Send only entries with a source that matches this regex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Send only entries with a kind that matches one of these patterns. In a
+    /// pattern, "*" matches any text. A writer from before patterns does not
+    /// know this field and sends all kinds, so a reader sends its kinds here
+    /// and not in `kinds`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kind_patterns: Vec<String>,
+    /// Do not send entries with a kind that matches one of these patterns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_kind_patterns: Vec<String>,
+    /// Send only entries with this level or a higher level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_level: Option<String>,
+    /// Send only entries with a subject that matches this pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
 }
 
 /// The largest compiled source regex, in bytes. The regex comes from another
@@ -74,6 +89,10 @@ pub struct Filter {
     kinds: Vec<String>,
     not_kinds: Vec<String>,
     source: Option<regex::Regex>,
+    kind_patterns: Vec<String>,
+    not_kind_patterns: Vec<String>,
+    min_level: usize,
+    subject: Option<String>,
 }
 
 impl Filter {
@@ -90,21 +109,64 @@ impl Filter {
                     .context("the source filter is not a valid regex")
             })
             .transpose()?;
+        let min_level = match req.min_level.as_deref() {
+            None => 0,
+            Some(level) => crate::entry::level_rank(level).with_context(|| {
+                format!(
+                    "the level filter is {level:?}, but it must be one of: {}",
+                    crate::entry::LEVELS.join(", ")
+                )
+            })?,
+        };
         Ok(Self {
             kinds: req.kinds.clone(),
             not_kinds: req.not_kinds.clone(),
             source,
+            kind_patterns: req.kind_patterns.clone(),
+            not_kind_patterns: req.not_kind_patterns.clone(),
+            min_level,
+            subject: req.subject.clone(),
         })
     }
 
     pub fn matches(&self, entry: &Entry) -> bool {
+        let kind = entry.kind_name();
         (self.kinds.is_empty() || self.kinds.contains(&entry.kind))
             && !self.not_kinds.contains(&entry.kind)
+            && (self.kind_patterns.is_empty() || self.kind_patterns.iter().any(|p| glob(p, kind)))
+            && !self.not_kind_patterns.iter().any(|p| glob(p, kind))
+            && entry.level_rank() >= self.min_level
+            && self
+                .subject
+                .as_deref()
+                .is_none_or(|pattern| entry.subject.as_deref().is_some_and(|s| glob(pattern, s)))
             && self
                 .source
                 .as_ref()
                 .is_none_or(|re| re.is_match(&entry.source))
     }
+}
+
+/// True if `text` matches `pattern`, where "*" matches any text, also an
+/// empty text. Other characters match only themselves.
+pub fn glob(pattern: &str, text: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let mut parts: Vec<&str> = parts.collect();
+    let Some(last) = parts.pop() else {
+        // no "*" in the pattern
+        return rest.is_empty();
+    };
+    for part in parts {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 fn yes() -> bool {
@@ -122,6 +184,10 @@ impl Default for Request {
             kinds: Vec::new(),
             not_kinds: Vec::new(),
             source: None,
+            kind_patterns: Vec::new(),
+            not_kind_patterns: Vec::new(),
+            min_level: None,
+            subject: None,
         }
     }
 }
@@ -129,6 +195,8 @@ impl Default for Request {
 /// One message from the server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// Almost every value is an entry, so a box would save no memory.
+#[allow(clippy::large_enum_variant)]
 pub enum Frame {
     /// One feed entry.
     Entry { entry: Entry },
@@ -234,6 +302,29 @@ mod tests {
     }
 
     #[test]
+    fn glob_matches_with_stars() {
+        for (pattern, text) in [
+            ("deploy.*", "deploy.finished"),
+            ("*", ""),
+            ("a*b*c", "aXbYc"),
+            ("backup/*", "backup/nas"),
+            ("event", "event"),
+            ("*.failed", "build.failed"),
+        ] {
+            assert!(glob(pattern, text), "{pattern} {text}");
+        }
+        for (pattern, text) in [
+            ("deploy.*", "deploy"),
+            ("a*a", "a"),
+            ("event", "events"),
+            ("ab*b", "ab"),
+            ("*.failed", "failed"),
+        ] {
+            assert!(!glob(pattern, text), "{pattern} {text}");
+        }
+    }
+
+    #[test]
     fn empty_request_means_everything_then_follow() {
         let req: Request = serde_json::from_str("{}").unwrap();
         assert_eq!(req, Request::default());
@@ -248,6 +339,10 @@ mod tests {
             time: Timestamp::UNIX_EPOCH,
             source: source.into(),
             kind: kind.into(),
+            level: None,
+            subject: None,
+            format: None,
+            data: None,
             title: None,
             body: "x".into(),
             extra: Default::default(),
@@ -270,6 +365,56 @@ mod tests {
         assert!(alerts.matches(&entry("alert", "disk")));
         assert!(!alerts.matches(&entry("alert", "diskette")));
         assert!(!alerts.matches(&entry("info", "disk")));
+    }
+
+    #[test]
+    fn filter_checks_patterns_levels_and_subjects() {
+        let entry = |kind: &str, level: Option<&str>, subject: Option<&str>| Entry {
+            v: crate::entry::SCHEMA_VERSION,
+            id: 1,
+            time: Timestamp::UNIX_EPOCH,
+            source: "ci".into(),
+            kind: kind.into(),
+            level: level.map(Into::into),
+            subject: subject.map(Into::into),
+            format: None,
+            data: None,
+            title: None,
+            body: "x".into(),
+            extra: Default::default(),
+        };
+        let filter = |req: Request| Filter::new(&req).unwrap();
+        let deploys = filter(Request {
+            kind_patterns: vec!["deploy.*".into()],
+            ..Default::default()
+        });
+        assert!(deploys.matches(&entry("deploy.finished", None, None)));
+        assert!(!deploys.matches(&entry("build.failed", None, None)));
+        // an old entry of kind "warn" is an event
+        let events = filter(Request {
+            kind_patterns: vec!["event".into()],
+            ..Default::default()
+        });
+        assert!(events.matches(&entry("warn", None, None)));
+        let urgent = filter(Request {
+            min_level: Some("warn".into()),
+            ..Default::default()
+        });
+        assert!(urgent.matches(&entry("event", Some("alert"), None)));
+        assert!(urgent.matches(&entry("warn", None, None)));
+        assert!(!urgent.matches(&entry("event", None, None)));
+        let backups = filter(Request {
+            subject: Some("backup/*".into()),
+            ..Default::default()
+        });
+        assert!(backups.matches(&entry("state", None, Some("backup/nas"))));
+        assert!(!backups.matches(&entry("state", None, Some("deploy/web"))));
+        assert!(!backups.matches(&entry("state", None, None)));
+        assert!(Filter::new(&Request {
+            min_level: Some("loud".into()),
+            ..Default::default()
+        })
+        .is_err());
     }
 
     #[test]

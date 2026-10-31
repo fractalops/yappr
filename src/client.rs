@@ -177,6 +177,8 @@ fn explain(conn: &Connection, me: EndpointId, err: anyhow::Error) -> anyhow::Err
 
 /// What a [`Follower`] reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Almost every value is an entry, so a box would save no memory.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// The next entry. Entries arrive in id order, with no duplicates.
     Entry(crate::entry::Entry),
@@ -250,8 +252,10 @@ impl Follower {
                 }
                 Ok(Some(Frame::CaughtUp { head })) => {
                     // The writer checked every entry up to `head`, also the
-                    // entries that the filter left out.
+                    // entries that the filter left out. After a reconnect,
+                    // the replay starts there, with no tail.
                     self.req.since = self.req.since.max(head);
+                    self.req.tail = None;
                     self.backoff = MIN_BACKOFF;
                     return Ok(Some(Event::CaughtUp { head }));
                 }

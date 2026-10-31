@@ -165,14 +165,16 @@ impl Renderer {
             self.paint(source_color(&entry.source), &entry.source),
             self.paint("2", &format!("{time} {id}")),
         )?;
-        let badge = match entry.kind.as_str() {
-            "info" => None,
-            "warn" => Some("1;33"),
-            "alert" => Some("1;31"),
-            _ => Some(""),
-        };
-        if let Some(sgr) = badge {
-            write!(w, " {}", self.paint(sgr, &entry.kind))?;
+        match entry.level() {
+            "warn" => write!(w, " {}", self.paint("1;33", "warn"))?,
+            "alert" => write!(w, " {}", self.paint("1;31", "alert"))?,
+            _ => {}
+        }
+        if entry.kind_name() != crate::entry::DEFAULT_KIND {
+            write!(w, " {}", entry.kind)?;
+        }
+        if let Some(subject) = &entry.subject {
+            write!(w, " {}", self.paint("2", subject))?;
         }
         let title = entry.title.as_deref().filter(|t| !t.is_empty());
         let body = entry.body.strip_suffix('\n').unwrap_or(&entry.body);
@@ -211,6 +213,10 @@ mod tests {
             time: "2026-10-27T09:30:00Z".parse().unwrap(),
             source: "disk".into(),
             kind: kind.into(),
+            level: None,
+            subject: None,
+            format: None,
+            data: None,
             title: Some("disk usage".into()),
             body: "Filesystem  Size\n/dev/sda1   100G\n".into(),
             extra: Default::default(),

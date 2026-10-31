@@ -5,6 +5,7 @@ use std::{
     path::Path,
     process::{Child, ChildStderr, Command, Stdio},
     str::FromStr,
+    time::Duration,
 };
 
 use yappr::EndpointTicket;
@@ -235,7 +236,7 @@ fn post_reads_the_body_from_stdin() {
     let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(v["source"], "disk");
     assert_eq!(v["title"], "disk usage");
-    assert_eq!(v["kind"], "info");
+    assert_eq!(v["kind"], "event");
     assert_eq!(v["body"], "Filesystem Size\n/dev/sda1 100G\n");
 }
 
@@ -447,7 +448,7 @@ fn a_pipe_gets_json_lines_by_default() {
 fn not_kind_hides_a_kind_and_moves_the_cursor_past_it() {
     let (writer, follower) = pair();
     writer.post("GET /", &["--kind", "log"]);
-    writer.post("disk full", &["--kind", "warn"]);
+    writer.post("disk full", &["--level", "warn"]);
     writer.post("GET /a", &["--kind", "log"]);
     writer.post("started", &[]);
     let serve = Serve::start(&writer);
@@ -465,13 +466,97 @@ fn not_kind_hides_a_kind_and_moves_the_cursor_past_it() {
             })
             .collect()
     };
-    assert_eq!(kinds(&["--cursor", "a"]), ["log", "warn", "log", "info"]);
+    assert_eq!(kinds(&["--cursor", "a"]), ["log", "event", "log", "event"]);
     assert_eq!(
         kinds(&["--cursor", "b", "--not-kind", "log"]),
-        ["warn", "info"]
+        ["event", "event"]
     );
     // The writer checked every entry, so the cursor is past the logs too.
     assert!(kinds(&["--cursor", "b"]).is_empty());
+}
+
+#[test]
+fn levels_subjects_and_data_reach_the_reader_and_its_filters() {
+    let (writer, follower) = pair();
+    writer.post(
+        "v1.4.1",
+        &["--kind", "deploy.finished", "--subject", "deploy/web"],
+    );
+    writer.post(
+        "late",
+        &[
+            "--kind",
+            "state",
+            "--subject",
+            "backup/nas",
+            "--level",
+            "warn",
+        ],
+    );
+    writer.post("ok", &["--kind", "state", "--subject", "backup/nas"]);
+    writer.post("# Notes", &["--markdown", "--data", r#"{"build":7}"#]);
+    let (code, _, stderr) = writer.exit(["post", "--body", "x", "--subject", "a b"], b"");
+    assert_eq!(code, 4, "{stderr}");
+    let (code, _, _) = writer.exit(["post", "--body", "x", "--data", "[1]"], b"");
+    assert_eq!(code, 2);
+    let serve = Serve::start(&writer);
+    let bodies = |args: &[&str]| -> Vec<String> {
+        let mut full = vec![
+            "read",
+            serve.ticket.as_str(),
+            "--output",
+            "json",
+            "--since",
+            "0",
+        ];
+        full.extend_from_slice(args);
+        follower
+            .run(full)
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["body"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+    assert_eq!(bodies(&["--kind", "deploy.*"]), ["v1.4.1"]);
+    assert_eq!(bodies(&["--subject", "backup/*"]), ["late", "ok"]);
+    assert_eq!(bodies(&["--subject", "backup/*", "--latest"]), ["ok"]);
+    assert_eq!(bodies(&["--latest"]), ["v1.4.1", "ok", "# Notes"]);
+    assert_eq!(bodies(&["--level", "warn"]), ["late"]);
+    // the kind of an entry from before levels
+    assert_eq!(bodies(&["--kind", "warn"]), ["late"]);
+
+    let json = follower.run(["read", &serve.ticket, "--output", "json", "--since", "3"]);
+    let notes: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    assert_eq!(
+        (notes["format"].as_str(), notes["data"]["build"].as_u64()),
+        (Some("markdown"), Some(7))
+    );
+    assert_eq!(notes["kind"], "event");
+}
+
+#[test]
+fn a_question_entry_keeps_its_subject_and_data() {
+    let (writer, device) = pair();
+    let id = writer.run([
+        "approve",
+        &device.id(),
+        "Deploy?",
+        "--subject",
+        "deploy/web",
+        "--data",
+        r#"{"commit":"abc"}"#,
+        "--no-wait",
+    ]);
+    let entries = log_entries(&writer);
+    let question = entries.iter().find(|e| e["kind"] == "question").unwrap();
+    assert_eq!(question["subject"], "deploy/web");
+    assert_eq!(question["data"]["commit"], "abc");
+    assert_ne!(question["source"], "yappr");
+    assert!(!id.trim().is_empty());
 }
 
 #[test]
@@ -569,6 +654,90 @@ fn live_follow_prints_new_entries() {
     child.wait().ok();
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(v["body"], "live");
+}
+
+/// Start "yappr on" and wait until it saved its first position, so that the
+/// entries after this are new for it.
+fn start_on(
+    device: &Machine,
+    writer: &Machine,
+    ticket: &str,
+    handler: &[&str],
+) -> std::process::Child {
+    let mut args = vec!["on", ticket, "--kind", "deploy.*", "--"];
+    args.extend_from_slice(handler);
+    let child = device
+        .command(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let cursor = device
+        .dir
+        .path()
+        .join("cursors")
+        .join(format!("{}.on", writer.id()));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !cursor.exists() {
+        assert!(std::time::Instant::now() < deadline, "on did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child
+}
+
+#[test]
+fn on_runs_the_command_for_new_matching_entries() {
+    let (writer, device) = pair();
+    writer.post("old", &["--kind", "deploy.requested"]);
+    let serve = Serve::start(&writer);
+    let handler = [
+        "sh",
+        "-c",
+        r#"read -r line; echo "$YAPPR_ID $YAPPR_SUBJECT $(echo "$line" | cut -c1-6)""#,
+    ];
+    let mut child = start_on(&device, &writer, &serve.ticket, &handler);
+    writer.post("other", &["--kind", "build.failed"]);
+    writer.post(
+        "new",
+        &["--kind", "deploy.requested", "--subject", "deploy/web"],
+    );
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let line = lines.next().unwrap().unwrap();
+    child.kill().ok();
+    child.wait().ok();
+    // the history and the other kind do not run, and stdin has the JSON entry
+    assert_eq!(line, r#"3 deploy/web {"v":1"#);
+}
+
+#[test]
+fn on_stops_when_the_command_fails_and_runs_the_entry_again() {
+    let (writer, device) = pair();
+    let serve = Serve::start(&writer);
+    let mut child = start_on(&device, &writer, &serve.ticket, &["false"]);
+    writer.post("deploy", &["--kind", "deploy.requested"]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(std::time::Instant::now() < deadline, "on did not stop");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(1));
+    let mut child = start_on(
+        &device,
+        &writer,
+        &serve.ticket,
+        &["sh", "-c", "echo $YAPPR_ID"],
+    );
+    let line = BufReader::new(child.stdout.take().unwrap())
+        .lines()
+        .next()
+        .unwrap()
+        .unwrap();
+    child.kill().ok();
+    child.wait().ok();
+    assert_eq!(line, "1");
 }
 
 #[test]
@@ -852,8 +1021,9 @@ fn post_json_relays_another_feed() {
                 e["body"].as_str().unwrap()
             ))
             .collect::<Vec<_>>(),
-        [("a", "info", "one"), ("b", "warn", "two")]
+        [("a", "event", "one"), ("b", "event", "two")]
     );
+    assert_eq!(entries[1]["level"], "warn");
 }
 
 #[test]

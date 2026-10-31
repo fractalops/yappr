@@ -49,6 +49,7 @@ struct Args {
 }
 
 #[derive(clap::Args, Debug)]
+#[clap(next_help_heading = "Global options")]
 struct CommonArgs {
     /// The name of the local feed.
     #[clap(long, global = true, env = "YAPPR_FEED", default_value = "default")]
@@ -88,7 +89,8 @@ enum Commands {
     /// have to run.
     #[clap(after_help = "Examples:
   df -h / | yappr post --source disk --title \"Disk usage\"
-  yappr read laptop -f --output json | jq -c 'select(.kind == \"alert\")' | yappr post --json")]
+  yappr post --kind deploy.finished --subject deploy/web --data '{\"version\":\"1.4.2\"}' --body \"v1.4.2 is live\"
+  yappr read laptop -f --output json | jq -c 'select(.level == \"alert\")' | yappr post --json")]
     Post(PostArgs),
 
     /// Serve the feed, pair one device, and keep serving.
@@ -119,6 +121,18 @@ enum Commands {
     /// The same as "read --follow".
     #[clap(hide = true)]
     Follow(ReadArgs),
+
+    /// Run a command for each new entry that matches the filters.
+    ///
+    /// The command gets the entry as JSON on stdin, and YAPPR_ID, YAPPR_KIND,
+    /// YAPPR_LEVEL, YAPPR_SUBJECT and YAPPR_SOURCE in its environment. The
+    /// saved position moves past an entry after the command exits with 0.
+    /// When the command fails, on stops, so the entry runs again at the next
+    /// start. The first start begins after the last entry of the feed.
+    #[clap(after_help = "Examples:
+  yappr on server --kind deploy.requested -- ./deploy.sh
+  yappr on server --level alert -- sh -c 'jq -r .title | say'")]
+    On(OnArgs),
 
     /// Let a device read this feed.
     Allow {
@@ -167,16 +181,19 @@ enum Commands {
     /// Answer a question from another writer.
     ///
     /// The answer waits in a local outbox until the writer saves it.
-    #[clap(after_help = "Example:\n  yappr answer laptop 3f9a... --choice retry")]
+    #[clap(after_help = "Example:\n  yappr answer laptop 3f9a... retry")]
     Answer {
         /// The alias, ID, or ticket of the writer that asked.
         #[clap(value_name = "WRITER")]
         ticket: String,
         /// The question ID.
         id: String,
-        /// The value of the selected choice.
-        #[clap(long = "choice", value_name = "VALUE")]
-        value: String,
+        /// The value of the selected choice, such as "approve".
+        #[clap(value_name = "VALUE", required_unless_present = "choice")]
+        value: Option<String>,
+        /// The same as VALUE.
+        #[clap(long, hide = true, conflicts_with = "value")]
+        choice: Option<String>,
     },
     /// Print this machine's identity, feed, peers, questions, and outbox.
     ///
@@ -194,7 +211,7 @@ enum Commands {
     Devices,
     /// Send queued choices again.
     Retry,
-    /// Name devices locally. An alias does not grant access. `devices` lists them.
+    /// Name devices locally. An alias does not grant access. `yappr status` lists them.
     Alias {
         #[clap(subcommand)]
         command: AliasCommand,
@@ -280,8 +297,12 @@ struct QuestionArgs {
     /// Details shown with the question.
     #[clap(long, default_value = "")]
     body: String,
-    #[clap(long, default_value = "yappr")]
-    source: String,
+    /// The program or the topic that the question comes from. The default is
+    /// the host name.
+    #[clap(long)]
+    source: Option<String>,
+    #[clap(flatten)]
+    details: DetailArgs,
     /// The time allowed for an answer, such as 10m or 2h.
     #[clap(long, value_parser = parse_interval, default_value = "10m")]
     timeout: Duration,
@@ -340,8 +361,8 @@ struct InitArgs {
     /// device's name.
     #[clap(long)]
     alias: Option<String>,
-    /// The invitation lifetime.
-    #[clap(long, value_parser = parse_interval, default_value = "5m")]
+    /// How long the invitation stays open, such as 5m or 1h.
+    #[clap(long = "timeout", alias = "expires", value_parser = parse_interval, default_value = "5m")]
     expires: Duration,
     /// The UDP port for IPv4. See serve --port.
     #[clap(long)]
@@ -354,8 +375,8 @@ struct PairArgs {
     /// name.
     #[clap(long)]
     name: Option<String>,
-    /// The invitation lifetime.
-    #[clap(long, value_parser = parse_interval, default_value = "5m")]
+    /// How long the invitation stays open, such as 5m or 1h.
+    #[clap(long = "timeout", alias = "expires", value_parser = parse_interval, default_value = "5m")]
     expires: Duration,
     /// Save the accepted device under this alias. The default comes from the
     /// device's name.
@@ -389,9 +410,13 @@ struct PostArgs {
     #[clap(long)]
     title: Option<String>,
 
-    /// The kind of entry. Followers color "warn" and "alert".
-    #[clap(long, default_value = "info")]
+    /// What the entry is, such as "deploy.finished". "state" means the
+    /// current state of the subject.
+    #[clap(long, default_value = entry::DEFAULT_KIND)]
     kind: String,
+
+    #[clap(flatten)]
+    details: DetailArgs,
 
     /// The body. If you do not give it, the body comes from stdin.
     #[clap(long)]
@@ -402,6 +427,46 @@ struct PostArgs {
     /// options.
     #[clap(long, conflicts_with = "body")]
     json: bool,
+}
+
+/// The optional fields that post, ask and approve share.
+#[derive(clap::Args, Debug)]
+struct DetailArgs {
+    /// How urgent it is. Readers color "warn" and "alert".
+    #[clap(long, value_parser = clap::builder::PossibleValuesParser::new(entry::LEVELS))]
+    level: Option<String>,
+
+    /// What it is about, such as "backup/nas". Entries with the same subject
+    /// belong together.
+    #[clap(long)]
+    subject: Option<String>,
+
+    /// A JSON object for programs, such as '{"version":"1.4.2"}'.
+    #[clap(long, value_name = "JSON", value_parser = parse_data)]
+    data: Option<serde_json::Map<String, serde_json::Value>>,
+
+    /// Show the body as Markdown in the app.
+    #[clap(long)]
+    markdown: bool,
+}
+
+impl DetailArgs {
+    fn into_details(self) -> entry::Details {
+        entry::Details {
+            level: self.level,
+            subject: self.subject,
+            format: self.markdown.then(|| "markdown".into()),
+            data: self.data,
+        }
+    }
+}
+
+fn parse_data(s: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    match serde_json::from_str(s) {
+        Ok(serde_json::Value::Object(data)) => Ok(data),
+        Ok(_) => Err("give a JSON object, such as '{\"version\":\"1.4.2\"}'".into()),
+        Err(e) => Err(format!("not valid JSON: {e}")),
+    }
 }
 
 fn parse_interval(s: &str) -> Result<Duration, String> {
@@ -433,7 +498,8 @@ struct ReadArgs {
     #[clap(long, value_name = "REGEX")]
     source: Option<Regex>,
 
-    /// Print only the entries of this kind. Use the option again for more kinds.
+    /// Print only the entries of this kind. "*" matches any text, as in
+    /// "deploy.*". Use the option again for more kinds.
     #[clap(long)]
     kind: Vec<String>,
 
@@ -441,6 +507,20 @@ struct ReadArgs {
     /// option again for more kinds.
     #[clap(long, value_name = "KIND")]
     not_kind: Vec<String>,
+
+    /// Print only the entries with this level or a higher level.
+    #[clap(long, value_parser = clap::builder::PossibleValuesParser::new(entry::LEVELS))]
+    level: Option<String>,
+
+    /// Print only the entries with a subject that matches this pattern, such
+    /// as "backup/*".
+    #[clap(long)]
+    subject: Option<String>,
+
+    /// Of the entries that are already in the feed, print only the newest
+    /// entry for each subject. Entries without a subject all print.
+    #[clap(long)]
+    latest: bool,
 
     /// The output format. The default is text for a terminal and JSON for a
     /// pipe or a file.
@@ -463,6 +543,47 @@ struct ReadArgs {
     /// positions.
     #[clap(long, default_value = "default", value_name = "NAME")]
     cursor: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct OnArgs {
+    /// The alias, endpoint ID, or ticket of the writer.
+    #[clap(value_name = "WRITER")]
+    ticket: String,
+
+    /// Run only for entries of this kind. "*" matches any text. Use the
+    /// option again for more kinds.
+    #[clap(long)]
+    kind: Vec<String>,
+
+    /// Do not run for entries of this kind.
+    #[clap(long, value_name = "KIND")]
+    not_kind: Vec<String>,
+
+    /// Run only for entries with this level or a higher level.
+    #[clap(long, value_parser = clap::builder::PossibleValuesParser::new(entry::LEVELS))]
+    level: Option<String>,
+
+    /// Run only for entries with a subject that matches this pattern.
+    #[clap(long)]
+    subject: Option<String>,
+
+    /// Run only for entries with a source that matches this regex.
+    #[clap(long, value_name = "REGEX")]
+    source: Option<Regex>,
+
+    /// When the command fails, print the error and continue with the next
+    /// entry, so the failed entry does not run again.
+    #[clap(long)]
+    skip_failed: bool,
+
+    /// The name of the saved position.
+    #[clap(long, default_value = "on", value_name = "NAME")]
+    cursor: String,
+
+    /// The command and its arguments. No shell reads them.
+    #[clap(last = true, required = true, value_name = "COMMAND")]
+    command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -530,7 +651,19 @@ impl CommonArgs {
     }
 }
 
-async fn post(common: &CommonArgs, args: PostArgs) -> Result<()> {
+async fn post(common: &CommonArgs, mut args: PostArgs) -> Result<()> {
+    // Before levels, the kind was the level.
+    if entry::LEVELS[1..].contains(&args.kind.as_str()) && args.details.level.is_none() {
+        eprintln!(
+            "Use --level {0} in place of --kind {0}. This entry gets level {0}.",
+            args.kind
+        );
+        args.details.level = Some(std::mem::replace(
+            &mut args.kind,
+            entry::DEFAULT_KIND.into(),
+        ));
+    }
+    let details = args.details.into_details();
     if args.json {
         // Install the handler before anything else, so that Ctrl-C stops
         // between two entries and not in the middle of one.
@@ -539,8 +672,12 @@ async fn post(common: &CommonArgs, args: PostArgs) -> Result<()> {
         let defaults = Draft {
             source: args.source.unwrap_or_else(hostname),
             kind: args.kind,
+            level: details.level,
+            subject: details.subject,
             title: args.title,
             body: String::new(),
+            format: details.format,
+            data: details.data,
             extra: Default::default(),
         };
         return ingest::run(
@@ -564,8 +701,12 @@ async fn post(common: &CommonArgs, args: PostArgs) -> Result<()> {
     let draft = Draft {
         source,
         kind: args.kind,
+        level: details.level,
+        subject: details.subject,
         title: args.title,
         body,
+        format: details.format,
+        data: details.data,
         extra: Default::default(),
     };
     let entry = store.append(draft)?;
@@ -715,6 +856,118 @@ async fn init(common: &CommonArgs, args: InitArgs) -> Result<()> {
 }
 
 /// Prints the entries that pass the filters, and moves the cursor.
+async fn on(common: &CommonArgs, args: OnArgs) -> Result<()> {
+    let dir = common.dir()?;
+    let addr = peers::resolve(&dir, &args.ticket)?;
+    let cursor = Cursor::new(&dir, addr.id, &args.cursor)?;
+    let mut req = Request {
+        follow: true,
+        kind_patterns: args.kind,
+        not_kind_patterns: args.not_kind,
+        min_level: args.level,
+        subject: args.subject,
+        source: args.source.as_ref().map(|re| re.as_str().to_string()),
+        ..Default::default()
+    };
+    if cursor.exists() {
+        req.since = cursor.load()?;
+    } else {
+        // A new handler runs for new entries only, not for the history.
+        req.tail = Some(0);
+    }
+    let filter = yappr::proto::Filter::new(&req)?;
+    let endpoint = net::bind(common.secret()?, common.net(None)?, vec![], None).await?;
+    let mut follower = Follower::new(endpoint.clone(), addr, req);
+    let result = async {
+        while let Some(event) = follower.next().await? {
+            match event {
+                Event::Entry(entry) => {
+                    if filter.matches(&entry) {
+                        if let Err(error) = run_handler(&args.command, &entry).await {
+                            if !args.skip_failed {
+                                return Err(
+                                    error.context(format!("entry #{} is not done", entry.id))
+                                );
+                            }
+                            eprintln!("entry #{}: {error:#}. Skipped.", entry.id);
+                        }
+                    }
+                    cursor.save(entry.id)?;
+                }
+                Event::CaughtUp { head } => {
+                    // Also save 0, so that the next start does not run the
+                    // entries that arrive in between as history.
+                    if !cursor.exists() || head > cursor.load()? {
+                        cursor.save(head)?;
+                    }
+                }
+                Event::Retrying { delay, error } => {
+                    eprintln!(
+                        "cannot read the feed: {error}. Retry in {}s",
+                        delay.as_secs()
+                    );
+                }
+            }
+        }
+        anyhow::Ok(())
+    }
+    .await;
+    endpoint.close().await;
+    result
+}
+
+/// Run the handler for one entry and wait for it.
+async fn run_handler(command: &[String], entry: &Entry) -> Result<()> {
+    let (program, args) = command.split_first().context("give a command")?;
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .env("YAPPR_ID", entry.id.to_string())
+        .env("YAPPR_KIND", entry.kind_name())
+        .env("YAPPR_LEVEL", entry.level())
+        .env(
+            "YAPPR_SUBJECT",
+            entry.subject.as_deref().unwrap_or_default(),
+        )
+        .env("YAPPR_SOURCE", &entry.source)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("start {program}"))?;
+    let mut line = serde_json::to_vec(entry)?;
+    line.push(b'\n');
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        // A handler that does not read stdin closes it early. That is not
+        // an error.
+        if let Err(e) = stdin.write_all(&line).await {
+            if e.kind() != io::ErrorKind::BrokenPipe {
+                return Err(e.into());
+            }
+        }
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+        bail!("{program} exited with {status}");
+    }
+    Ok(())
+}
+
+/// The entries without a subject, and the newest entry for each subject, in
+/// feed order. Only the entries that the filter wants count.
+fn newest_for_each_subject(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut newest = std::collections::HashMap::new();
+    for (at, entry) in entries.iter().enumerate() {
+        if let Some(subject) = &entry.subject {
+            newest.insert(subject.clone(), at);
+        }
+    }
+    entries
+        .into_iter()
+        .enumerate()
+        .filter(|(at, entry)| entry.subject.as_ref().is_none_or(|s| newest[s] == *at))
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
 struct Printer {
     cursor: Option<Cursor>,
     /// The writer applies the same filter. A writer that does not know the
@@ -769,7 +1022,29 @@ impl Printer {
     }
 }
 
-async fn read(common: &CommonArgs, args: ReadArgs) -> Result<()> {
+/// Before levels, the kind was the level, and every other entry had the kind
+/// "info". These kinds now mean a level, or no filter at all.
+fn legacy_kinds(args: &mut ReadArgs) {
+    let mut levels = Vec::new();
+    args.kind.retain(|kind| match kind.as_str() {
+        "warn" | "alert" => {
+            levels.push(kind.clone());
+            false
+        }
+        "info" => {
+            eprintln!("Entries have the kind \"event\" now. Use --kind event.");
+            false
+        }
+        _ => true,
+    });
+    if let Some(level) = levels.into_iter().min_by_key(|l| entry::level_rank(l)) {
+        eprintln!("Use --level {level} in place of --kind {level}.");
+        args.level.get_or_insert(level);
+    }
+}
+
+async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
+    legacy_kinds(&mut args);
     let dir = common.dir()?;
     let mut targets = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -803,8 +1078,10 @@ async fn read(common: &CommonArgs, args: ReadArgs) -> Result<()> {
         let mut req = Request {
             follow: args.follow && !args.no_follow,
             tail: args.tail,
-            kinds: args.kind.clone(),
-            not_kinds: args.not_kind.clone(),
+            kind_patterns: args.kind.clone(),
+            not_kind_patterns: args.not_kind.clone(),
+            min_level: args.level.clone(),
+            subject: args.subject.clone(),
             source: args.source.as_ref().map(|re| re.as_str().to_string()),
             ..Default::default()
         };
@@ -831,14 +1108,26 @@ async fn read(common: &CommonArgs, args: ReadArgs) -> Result<()> {
             renderer: renderer.clone(),
         };
         let status = args.follow && !args.no_follow && io::stderr().is_terminal();
+        let latest = args.latest;
         let mut follower = Follower::new(endpoint.clone(), addr, req);
         tasks.spawn(async move {
             let mut caught_up = false;
+            // With --latest, the replay waits here until it is complete.
+            let mut replay: Option<Vec<Entry>> = latest.then(Vec::new);
             let result = async {
                 while let Some(event) = follower.next().await? {
                     match event {
-                        Event::Entry(entry) => printer.print(&entry)?,
+                        Event::Entry(entry) => match &mut replay {
+                            Some(replay) if printer.wants(&entry) => replay.push(entry),
+                            Some(_) => {}
+                            None => printer.print(&entry)?,
+                        },
                         Event::CaughtUp { head } => {
+                            if let Some(replay) = replay.take() {
+                                for entry in newest_for_each_subject(replay) {
+                                    printer.print(&entry)?;
+                                }
+                            }
                             printer.passed(head)?;
                             if status && !caught_up {
                                 let health =
@@ -1148,13 +1437,13 @@ async fn ask(
     let question = choices::new_question(
         title,
         args.body,
-        args.source,
+        args.source.unwrap_or_else(hostname),
         options,
         responder,
         Some(expires_at),
         approval,
     );
-    let question: Question = choices::create(&store, question)?;
+    let question: Question = choices::create_with(&store, question, args.details.into_details())?;
     if args.no_wait {
         println!("{}", question.id);
         return Ok(());
@@ -1528,6 +1817,12 @@ async fn run(args: Args) -> Result<()> {
         Commands::Post(args) => post(common, args).await,
         Commands::Serve(args) => serve(common, args).await,
         Commands::Init(args) => init(common, args).await,
+        Commands::On(args) => {
+            tokio::select! {
+                res = on(common, args) => res,
+                _ = tokio::signal::ctrl_c() => Ok(()),
+            }
+        }
         Commands::Read(args) => {
             tokio::select! {
                 res = read(common, args) => res,
@@ -1585,8 +1880,14 @@ async fn run(args: Args) -> Result<()> {
         Commands::Cancel { id } => choices::cancel(&common.store()?, &id),
         Commands::Devices => devices(common),
         Commands::Status { output } => status(common, Format::is_text(output)),
-        Commands::Answer { ticket, id, value } => {
+        Commands::Answer {
+            ticket,
+            id,
+            value,
+            choice,
+        } => {
             let ticket = EndpointTicket::new(peers::resolve(&common.dir()?, &ticket)?);
+            let value = value.or(choice).context("give the value of a choice")?;
             answer(common, ticket, id, value).await
         }
         Commands::Retry => retry(common).await,

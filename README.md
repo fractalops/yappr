@@ -1,6 +1,4 @@
-<img src="docs/assets/yappr.svg" alt="Yappr logo" width="64" height="64" />
-
-# Yappr
+<h1><img src="docs/assets/yappr.svg" alt="" width="48" height="48" align="middle" /> Yappr</h1>
 
 **Give your scripts and agents a way to reach you and get an answer.**
 
@@ -33,10 +31,7 @@ cargo install --git https://github.com/fractalops/yappr
 
 ## Start with `yappr init`
 
-Here, `server` posts updates and asks questions. `laptop` reads them and sends
-your answers.
-
-On the server, start the feed and pair your first device:
+Start the feed and pair your first device:
 
 ```sh
 yappr init
@@ -44,12 +39,9 @@ yappr init
 
 <img src="docs/assets/init.gif" alt="yappr init shows a pairing code, accepts a laptop, and keeps serving the feed" width="800" />
 
-`init` creates the local feed and device identity if needed, then starts the
-server. It opens a five-minute pairing invitation and shows a QR code in the
-terminal. It also prints a pairing code that starts with `YAPPR:`.
+`init` starts the feed and shows QR and `YAPPR:` pairing codes, valid for five minutes.
 
-On a phone, open [yappr.run](https://yappr.run) and scan the QR code.
-On the laptop, print its device ID, then join with the server's pairing code:
+Scan the QR code at [yappr.run](https://yappr.run) on your phone, or join from a laptop:
 
 ```sh
 yappr id
@@ -129,7 +121,7 @@ yappr read server --since 0 --output json \
 Replace `QUESTION_ID` with an ID from the output. For an approval, answer with:
 
 ```sh
-yappr answer server QUESTION_ID --choice approve
+yappr answer server QUESTION_ID approve
 ```
 
 Yappr saves your answer locally before sending it.
@@ -155,11 +147,9 @@ yappr deny laptop
 yappr health server    # connection state, path, and round-trip time
 ```
 
-Only devices you allow can read the feed. A feed ticket carries connection
-information. You grant read access through pairing or `yappr allow`.
-Each question names the one device that can answer it.
-`yappr deny` revokes read access. A running `serve` closes the device's feed
-connections within five seconds.
+Pairing or `yappr allow` grants read access. Only the assigned device can answer
+each question. `yappr deny` revokes access and closes active feed connections
+within five seconds.
 
 ## Reference
 

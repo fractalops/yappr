@@ -30,7 +30,7 @@ writer has the same format.
 **The entry format:**
 
 ```json
-{"v":1,"id":42,"time":"2026-10-27T09:30:00Z","source":"disk","kind":"info","title":"disk usage","body":"..."}
+{"v":1,"id":42,"time":"2026-10-27T09:30:00Z","source":"ci","kind":"deploy.finished","level":"info","subject":"deploy/web","title":"Deployed web","body":"v1.4.2 is live.","data":{"version":"1.4.2"}}
 ```
 
 | field    | type    | rule                                                        |
@@ -39,12 +39,27 @@ writer has the same format.
 | `id`     | integer | 1, 2, 3 and so on, in the order of the writer               |
 | `time`   | string  | RFC 3339 time in UTC, set by the writer                     |
 | `source` | string  | 1 to 64 bytes, one line                                     |
-| `kind`   | string  | 1 to 32 bytes, one line. Usual values: `info`, `warn`, `alert` |
+| `kind`   | string  | 1 to 32 bytes, one line. What the entry is. The default is `event` |
+| `level`  | string  | optional: `info`, `warn` or `alert`. No level means `info`  |
+| `subject`| string  | optional, 1 to 256 bytes, no spaces. What the entry is about, such as `backup/nas` |
 | `title`  | string  | optional, at most 256 bytes, one line                       |
 | `body`   | string  | at most 256 KiB. Newline and tab are the only control characters |
+| `format` | string  | optional: `text` or `markdown`. No format means `text`      |
+| `data`   | object  | optional JSON object for programs, at most 64 KiB           |
 
 An entry has a title, a body or both. `post` rejects an entry that breaks a
-rule. This includes terminal color codes in the body, so use `NO_COLOR=1` on
+rule.
+
+**Kinds.** `event` means that something happened. `state` means the current
+state of the subject: a newer `state` entry with the same subject replaces it.
+`question` is a question or an approval request. Use your own names for other
+kinds, such as `deploy.finished` or `backup.failed`. Entries from before
+levels have the kind `info`, `warn` or `alert`. Readers show them as events,
+and `warn` and `alert` as that level.
+
+**Markdown.** With `--markdown`, the app shows the body as Markdown. It does
+not show raw HTML or images, and it makes links from `http` and `https` URLs
+only. `read` prints the Markdown source. This includes terminal color codes in the body, so use `NO_COLOR=1` on
 the producer.
 
 **Versions.** A new optional field does not change `v`. A change that removes
@@ -53,8 +68,9 @@ that you do not know. `read` keeps them in its JSON output, and it stops at
 an entry with a `v` that it does not know.
 
 **Input for `post --json`.** Each line is one JSON object. `post` uses the
-fields `source`, `kind`, `title` and `body`. A field that a line does not have
-comes from the options (`--source`, `--kind`, `--title`). The writer sets `v`,
+fields `source`, `kind`, `level`, `subject`, `title`, `body`, `format` and
+`data`. A field that a line does not have comes from the options (`--source`,
+`--kind`, `--level`, `--subject`, `--title`, `--markdown`, `--data`). The writer sets `v`,
 `id` and `time`, so `post` ignores these fields in the input. `post` keeps all
 other fields in the entry. Thus the output of `read --output json` is valid
 input. With several writers, that output wraps each entry as
@@ -126,7 +142,7 @@ Use `yappr cancel ID` to cancel a pending question.
 For an approval, the preset values are `approve` and `reject`.
 The [exit codes](#exit-codes) table lists the result codes of `ask`, `approve` and `wait`.
 
-`yappr answer WRITER ID --choice VALUE` saves a submission locally before it contacts the writer.
+`yappr answer WRITER ID VALUE` saves a submission locally before it contacts the writer.
 On success, it prints the decision as JSON.
 On a transport failure, it returns code 5. The submission remains queued.
 Use `yappr retry` to send queued submissions again.
@@ -146,7 +162,7 @@ Ordinary feed readers can ignore this field.
 `yappr pair` pairs one device while `yappr serve` runs in another process.
 Both print the pairing code to stdout and status to stderr.
 When stderr is a terminal, they also draw the code as a QR code there.
-Use `--expires DURATION` to change the five-minute invitation lifetime.
+Use `--timeout DURATION` to change the five-minute invitation lifetime.
 Use `--name NAME` to set the writer name that the joining device shows. The default is the host name.
 
 A pairing code starts with `YAPPR:`, followed by capital letters and digits.
@@ -198,9 +214,34 @@ Several feeds print entries as they arrive. They do not guarantee a shared time 
 `read` saves its position after each entry and resumes there after a failure.
 `--since ID|DURATION|TIME` and `--tail N` do not change the saved position.
 Use `--cursor NAME` for an independent position, for example one for a script.
-Use `--source REGEX`, `--kind KIND` and `--not-kind KIND` to filter output. `--output raw` prints bodies only.
+Use `--source REGEX`, `--kind KIND`, `--not-kind KIND`, `--level LEVEL` and `--subject PATTERN` to filter output.
+In `--kind`, `--not-kind` and `--subject`, `*` matches any text, as in `deploy.*` or `backup/*`.
+`--level warn` prints `warn` and `alert` entries.
+`--latest` prints only the newest entry for each subject from the feed history. Entries without a subject all print.
+`--output raw` prints bodies only.
 The writer applies these filters, so entries that the filter leaves out do not cross the network.
 After the replay, the cursor moves past every entry that the writer checked, also the entries that the filter left out.
+
+## Running a command for each entry
+
+`yappr on WRITER [filters] -- COMMAND` runs the command once for each new entry that the filters match.
+It takes the same filters as `read`.
+
+```sh
+yappr on server --kind deploy.requested -- ./deploy.sh
+```
+
+The command gets the entry as one JSON line on stdin.
+Its environment also has `YAPPR_ID`, `YAPPR_KIND`, `YAPPR_LEVEL`, `YAPPR_SUBJECT` and `YAPPR_SOURCE`.
+No shell reads the command or the entry, so the text of an entry cannot become a command.
+`on` waits for the command, and it runs one command at a time.
+
+The first start begins after the last entry of the feed, so `on` does not run the command for old entries.
+`on` saves its position after the command exits with 0.
+When the command fails, `on` stops with code 1, and the entry runs again at the next start.
+With `--skip-failed`, `on` writes the error to stderr and continues with the next entry.
+`on` uses its own saved position, named `on`. Use `--cursor NAME` for each handler on the same writer.
+Run `on` under a service manager, such as systemd or launchd, to restart it after a failure.
 
 
 ## Devices and access

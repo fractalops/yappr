@@ -18,6 +18,10 @@ fn draft(source: &str, body: &str) -> Draft {
     Draft {
         source: source.into(),
         kind: "info".into(),
+        level: None,
+        subject: None,
+        format: None,
+        data: None,
         title: None,
         body: body.into(),
         extra: Default::default(),
@@ -291,6 +295,10 @@ async fn the_writer_sends_only_the_entries_that_match_the_filter() {
             .store
             .append(Draft {
                 kind: kind.into(),
+                level: None,
+                subject: None,
+                format: None,
+                data: None,
                 ..draft(source, body)
             })
             .unwrap()

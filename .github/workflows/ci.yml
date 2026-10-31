@@ -53,8 +53,12 @@ jobs:
         with:
           toolchain: stable
       - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Hosted macOS runners block mDNS multicast, so the mDNS test runs on
+      # Linux only.
       - name: cargo test
-        run: cargo test --locked --all-targets
+        run: >-
+          cargo test --locked --all-targets --
+          ${{ runner.os == 'macOS' && '--skip mdns_finds_a_writer_from_its_id_only' || '' }}
 
   # The rust-version in Cargo.toml must build.
   msrv:

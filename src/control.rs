@@ -1,30 +1,22 @@
 //! Bounded request streams on reusable authenticated iroh connections.
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    choices::{self, ChoiceError, Decision, QuestionState, Submission},
-    pairing::{self, Join, PairReply},
+    choices::{ChoiceError, Decision, QuestionState, Submission},
     proto,
-    store::Store,
 };
 use anyhow::{Context, Result};
 use iroh::{
-    endpoint::{Connection, ConnectionError, RecvStream, SendStream, VarInt},
-    protocol::{AcceptError, ProtocolHandler},
+    endpoint::{Connection, ConnectionError, VarInt},
     Endpoint, EndpointAddr, EndpointId,
 };
+use n0_future::time::{Duration, Instant};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::sync::Mutex;
 
 pub const ALPN: &[u8] = b"choices/0";
 const MAX_CONTROL: usize = 16 * 1024;
 const IDLE: Duration = Duration::from_secs(60);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_STREAMS: usize = 16;
 const MAX_CONNECTIONS: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,109 +33,137 @@ pub enum Reply {
     Rejected { error: ChoiceError },
 }
 
-#[derive(Debug, Clone)]
-pub struct ChoicesProtocol(pub Store);
-impl ProtocolHandler for ChoicesProtocol {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        serve(conn, self.0.clone(), false).await;
-        Ok(())
-    }
-}
-#[derive(Debug, Clone)]
-pub struct PairProtocol(pub Store);
-impl ProtocolHandler for PairProtocol {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        serve(conn, self.0.clone(), true).await;
-        Ok(())
-    }
-}
+/// The writer side: answers choice and pairing requests.
+#[cfg(not(wasm_browser))]
+mod writer {
+    use iroh::{
+        endpoint::{Connection, RecvStream, SendStream, VarInt},
+        protocol::{AcceptError, ProtocolHandler},
+        EndpointId,
+    };
+    use tokio::task::JoinSet;
 
-async fn serve(conn: Connection, store: Store, pair: bool) {
-    let mut requests = JoinSet::new();
-    loop {
-        // Bound concurrent work. New streams remain flow-controlled by QUIC.
-        while requests.len() >= MAX_STREAMS {
-            requests.join_next().await;
+    use super::{Duration, Reply, Request, IDLE, MAX_CONTROL};
+    use crate::{
+        choices::{self, ChoiceError},
+        pairing::{self, Join, PairReply},
+        proto,
+        store::Store,
+    };
+    use anyhow::{Context, Result};
+
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+    const MAX_STREAMS: usize = 16;
+
+    #[derive(Debug, Clone)]
+    pub struct ChoicesProtocol(pub Store);
+    impl ProtocolHandler for ChoicesProtocol {
+        async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+            serve(conn, self.0.clone(), false).await;
+            Ok(())
         }
-        let accepted = tokio::time::timeout(IDLE, conn.accept_bi()).await;
-        let Ok(Ok((send, recv))) = accepted else {
-            break;
-        };
-        while requests.try_join_next().is_some() {}
-        let store = store.clone();
-        let remote = conn.remote_id();
-        requests.spawn(async move {
-            match tokio::time::timeout(REQUEST_TIMEOUT, handle(send, recv, store, remote, pair))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::debug!(%error, "control stream failed"),
-                Err(error) => tracing::debug!(%error, "control stream timed out"),
-            }
-        });
     }
-    // A stream can commit a decision even when its caller loses the response.
-    while requests.join_next().await.is_some() {}
-    conn.close(VarInt::from_u32(0), b"control idle or closed");
-}
+    #[derive(Debug, Clone)]
+    pub struct PairProtocol(pub Store);
+    impl ProtocolHandler for PairProtocol {
+        async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+            serve(conn, self.0.clone(), true).await;
+            Ok(())
+        }
+    }
 
-async fn handle(
-    mut send: SendStream,
-    mut recv: RecvStream,
-    store: Store,
-    remote: EndpointId,
-    pair: bool,
-) -> Result<()> {
-    if pair {
-        let request: Join = proto::read_frame(&mut recv, MAX_CONTROL)
-            .await?
-            .context("no pairing request")?;
-        let reply = tokio::task::spawn_blocking(move || pairing::join(&store, remote, request))
-            .await?
-            .unwrap_or_else(|_| PairReply {
-                status: "rejected".into(),
-                message:
-                    "The invitation expired or is not valid. Create a new invitation on the writer."
-                        .into(),
-            });
-        proto::write_frame(&mut send, &reply, MAX_CONTROL).await?;
-    } else {
-        let req: Request = proto::read_frame(&mut recv, MAX_CONTROL)
-            .await?
-            .context("no choice request")?;
-        let result = tokio::task::spawn_blocking(move || match req {
-            Request::Submit { submission } => choices::decide(&store, remote, submission)
-                .map(|decision| Reply::Accepted { decision }),
-            Request::Status { question_id } => {
-                if !store.allow_list().contains(&remote) {
-                    return Err(
-                        ChoiceError::new("denied", "this device cannot read the feed").into(),
-                    );
-                }
-                choices::get(&store.entries()?, &question_id).map(|state| Reply::State {
-                    state: Box::new(state),
-                })
+    async fn serve(conn: Connection, store: Store, pair: bool) {
+        let mut requests = JoinSet::new();
+        loop {
+            // Bound concurrent work. New streams remain flow-controlled by QUIC.
+            while requests.len() >= MAX_STREAMS {
+                requests.join_next().await;
             }
-        })
-        .await?;
-        let reply = result.unwrap_or_else(|error| Reply::Rejected {
-            error: public_error(error),
-        });
-        proto::write_frame(&mut send, &reply, proto::MAX_FRAME).await?;
+            let accepted = n0_future::time::timeout(IDLE, conn.accept_bi()).await;
+            let Ok(Ok((send, recv))) = accepted else {
+                break;
+            };
+            while requests.try_join_next().is_some() {}
+            let store = store.clone();
+            let remote = conn.remote_id();
+            requests.spawn(async move {
+                match n0_future::time::timeout(
+                    REQUEST_TIMEOUT,
+                    handle(send, recv, store, remote, pair),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::debug!(%error, "control stream failed"),
+                    Err(error) => tracing::debug!(%error, "control stream timed out"),
+                }
+            });
+        }
+        // A stream can commit a decision even when its caller loses the response.
+        while requests.join_next().await.is_some() {}
+        conn.close(VarInt::from_u32(0), b"control idle or closed");
     }
-    send.finish()?;
-    Ok(())
-}
-fn public_error(error: anyhow::Error) -> ChoiceError {
-    if let Some(error) = error.downcast_ref::<ChoiceError>() {
-        return error.clone();
+
+    async fn handle(
+        mut send: SendStream,
+        mut recv: RecvStream,
+        store: Store,
+        remote: EndpointId,
+        pair: bool,
+    ) -> Result<()> {
+        if pair {
+            let request: Join = proto::read_frame(&mut recv, MAX_CONTROL)
+                .await?
+                .context("no pairing request")?;
+            let reply = tokio::task::spawn_blocking(move || pairing::join(&store, remote, request))
+                .await?
+                .unwrap_or_else(|_| PairReply {
+                    status: "rejected".into(),
+                    message:
+                        "The invitation expired or is not valid. Create a new invitation on the writer."
+                            .into(),
+                });
+            proto::write_frame(&mut send, &reply, MAX_CONTROL).await?;
+        } else {
+            let req: Request = proto::read_frame(&mut recv, MAX_CONTROL)
+                .await?
+                .context("no choice request")?;
+            let result = tokio::task::spawn_blocking(move || match req {
+                Request::Submit { submission } => choices::decide(&store, remote, submission)
+                    .map(|decision| Reply::Accepted { decision }),
+                Request::Status { question_id } => {
+                    if !store.allow_list().contains(&remote) {
+                        return Err(
+                            ChoiceError::new("denied", "this device cannot read the feed").into(),
+                        );
+                    }
+                    choices::get(&store.entries()?, &question_id).map(|state| Reply::State {
+                        state: Box::new(state),
+                    })
+                }
+            })
+            .await?;
+            let reply = result.unwrap_or_else(|error| Reply::Rejected {
+                error: public_error(error),
+            });
+            proto::write_frame(&mut send, &reply, proto::MAX_FRAME).await?;
+        }
+        send.finish()?;
+        Ok(())
     }
-    tracing::warn!("choice storage error: {error:#}");
-    ChoiceError::new(
-        "storage",
-        "the writer could not save the decision. Try again",
-    )
+    fn public_error(error: anyhow::Error) -> ChoiceError {
+        if let Some(error) = error.downcast_ref::<ChoiceError>() {
+            return error.clone();
+        }
+        tracing::warn!("choice storage error: {error:#}");
+        ChoiceError::new(
+            "storage",
+            "the writer could not save the decision. Try again",
+        )
+    }
 }
+#[cfg(not(wasm_browser))]
+pub use writer::{ChoicesProtocol, PairProtocol};
 
 type PoolKey = (EndpointId, Vec<u8>);
 #[derive(Debug)]
@@ -240,7 +260,7 @@ impl ControlClient {
         alpn: &[u8],
         request: &Q,
     ) -> Result<A> {
-        tokio::time::timeout(Duration::from_secs(15), async {
+        n0_future::time::timeout(Duration::from_secs(15), async {
             let shared = self.slot((addr.id, alpn.to_vec())).await;
             let mut slot = shared.lock().await;
             for attempt in 0..2 {
@@ -254,7 +274,7 @@ impl ControlClient {
                 match result {
                     Ok(value) => return Ok(value),
                     Err(error) => {
-                        let denied = matches!(conn.close_reason(), Some(ConnectionError::ApplicationClosed(ref close)) if close.error_code == VarInt::from_u32(crate::access::DENIED_CODE));
+                        let denied = matches!(conn.close_reason(), Some(ConnectionError::ApplicationClosed(ref close)) if close.error_code == VarInt::from_u32(crate::proto::DENIED_CODE));
                         let closed = conn.close_reason().is_some();
                         if slot.connection.as_ref().is_some_and(|c| c.stable_id() == conn.stable_id()) {
                             slot.connection.take();

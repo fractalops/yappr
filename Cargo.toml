@@ -14,19 +14,29 @@ rust-version = "1.91"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 data-encoding = "2.11.1"
-dirs = "7.0.0"
-gethostname = "1.1.0"
 iroh = "1"
-iroh-mdns-address-lookup = "0.6.1"
 iroh-tickets = "1"
 jiff = { version = "0.2.38", features = ["serde"] }
 n0-future = "0.3.2"
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-tokio = { version = "1.54.1", features = ["full"] }
+tokio = { version = "1.54.1", default-features = false, features = ["io-util", "macros", "sync"] }
 tracing = "0.1.44"
+
+# The command line and the writer. A browser build of the library leaves them out.
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+dirs = "7.0.0"
+gethostname = "1.1.0"
+iroh-mdns-address-lookup = "0.6.1"
+tokio = { version = "1.54.1", features = ["full"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+jiff = { version = "0.2.38", features = ["js"] }
+
+[build-dependencies]
+cfg_aliases = "0.2.2"
 
 [dev-dependencies]
 duct = "1.1.2"

@@ -1,4 +1,5 @@
 //! Expiring invitations with confirmation on the writer.
+#[cfg(not(wasm_browser))]
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{bail, Context, Result};
@@ -6,7 +7,9 @@ use iroh::EndpointId;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::{disk, store::Store, EndpointTicket};
+use crate::EndpointTicket;
+#[cfg(not(wasm_browser))]
+use crate::{disk, store::Store};
 
 pub const ALPN: &[u8] = b"pair/0";
 
@@ -53,6 +56,7 @@ pub struct Offer {
     pub candidate: Option<Candidate>,
     pub status: String,
 }
+#[cfg(not(wasm_browser))]
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Offers {
     offers: BTreeMap<String, Offer>,
@@ -69,6 +73,7 @@ pub struct PairReply {
     pub message: String,
 }
 
+#[cfg(not(wasm_browser))]
 pub fn create(
     store: &Store,
     ticket: String,
@@ -106,6 +111,7 @@ pub fn create(
 /// True while an invitation in `dir` can still give an unknown device an
 /// answer. Only then can an unknown device use the pairing protocol.
 /// An accepted device is in the allow list and does not need this.
+#[cfg(not(wasm_browser))]
 pub fn open(dir: &Path) -> bool {
     match disk::read::<Offers>(&dir.join("pairing.json")) {
         Ok(offers) => {
@@ -122,6 +128,7 @@ pub fn open(dir: &Path) -> bool {
     }
 }
 
+#[cfg(not(wasm_browser))]
 pub fn get(dir: &Path, token: &str) -> Result<Offer> {
     let offers: Offers = disk::read(&dir.join("pairing.json"))?;
     offers
@@ -131,6 +138,7 @@ pub fn get(dir: &Path, token: &str) -> Result<Offer> {
         .context("the pairing invitation does not exist")
 }
 
+#[cfg(not(wasm_browser))]
 pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairReply> {
     if request.name.trim().is_empty()
         || request.name.len() > 64
@@ -177,6 +185,7 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
     Ok(reply)
 }
 
+#[cfg(not(wasm_browser))]
 pub fn confirm(store: &Store, remote: EndpointId, accept: bool) -> Result<()> {
     let _lock = disk::lock(store.dir(), "pairing.lock")?;
     let path = store.dir().join("pairing.json");
@@ -197,6 +206,7 @@ pub fn confirm(store: &Store, remote: EndpointId, accept: bool) -> Result<()> {
     disk::write(&path, &offers)
 }
 
+#[cfg(not(wasm_browser))]
 pub fn revoke(dir: &Path, token: &str) -> Result<()> {
     let _lock = disk::lock(dir, "pairing.lock")?;
     let path = dir.join("pairing.json");

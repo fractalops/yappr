@@ -47,7 +47,7 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn random_id() -> String {
-    data_encoding::HEXLOWER.encode(&iroh::SecretKey::generate().to_bytes())
+    crate::choices::random_id()
 }
 
 pub fn lock(dir: &Path, name: &str) -> Result<fs::File> {

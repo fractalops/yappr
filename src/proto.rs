@@ -10,6 +10,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::entry::Entry;
 
+/// The QUIC application error code for a denied connection.
+pub const DENIED_CODE: u32 = 403;
+/// The QUIC close reason for a denied connection.
+pub const DENIED_REASON: &[u8] = b"not allowed";
+
 /// Maximum size of a request frame, in bytes.
 pub const MAX_REQUEST: usize = 4 * 1024;
 /// Maximum size of a server frame, in bytes.

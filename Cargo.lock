@@ -1636,10 +1636,12 @@ dependencies = [
  "jiff-core",
  "jiff-static",
  "jiff-tzdb-platform",
+ "js-sys",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -4236,6 +4238,7 @@ name = "yappr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cfg_aliases",
  "clap",
  "data-encoding",
  "dirs",

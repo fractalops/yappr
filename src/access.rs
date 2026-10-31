@@ -15,10 +15,7 @@ use iroh::{
     EndpointId,
 };
 
-/// The QUIC application error code for a denied connection.
-pub const DENIED_CODE: u32 = 403;
-/// The QUIC close reason for a denied connection.
-pub const DENIED_REASON: &[u8] = b"not allowed";
+pub use crate::proto::{DENIED_CODE, DENIED_REASON};
 
 /// The allow list file: one endpoint id per line.
 #[derive(Debug, Clone)]

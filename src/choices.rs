@@ -6,11 +6,9 @@ use iroh::EndpointId;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    disk,
-    entry::{Draft, Entry},
-    store::Store,
-};
+use crate::entry::{Draft, Entry};
+#[cfg(not(wasm_browser))]
+use crate::store::Store;
 
 const FIELD: &str = "choices";
 
@@ -90,6 +88,7 @@ fn record(entry: &Entry) -> Option<Record> {
         .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
+#[cfg(not(wasm_browser))]
 fn draft(record: Record, title: String, body: String, source: String, kind: &str) -> Result<Draft> {
     let mut extra = serde_json::Map::new();
     extra.insert(FIELD.into(), serde_json::to_value(record)?);
@@ -149,6 +148,12 @@ impl Question {
     }
 }
 
+/// 32 random bytes as lowercase hexadecimal: the format of question,
+/// submission, and invitation IDs.
+pub fn random_id() -> String {
+    data_encoding::HEXLOWER.encode(&iroh::SecretKey::generate().to_bytes())
+}
+
 pub fn valid_id(id: &str) -> bool {
     id.len() == 64
         && id
@@ -169,6 +174,7 @@ pub fn approval_options() -> Vec<Choice> {
     ]
 }
 
+#[cfg(not(wasm_browser))]
 pub fn create(store: &Store, question: Question) -> Result<Question> {
     question.validate()?;
     if question.expires_at.is_some_and(|t| t <= Timestamp::now()) {
@@ -270,6 +276,7 @@ pub fn get(entries: &[Entry], id: &str) -> Result<QuestionState> {
         .ok_or_else(|| ChoiceError::new("not_found", "the question does not exist").into())
 }
 
+#[cfg(not(wasm_browser))]
 pub fn decide(store: &Store, responder: EndpointId, submission: Submission) -> Result<Decision> {
     if !valid_id(&submission.id) || !valid_id(&submission.question_id) {
         return Err(
@@ -325,6 +332,7 @@ pub fn decide(store: &Store, responder: EndpointId, submission: Submission) -> R
     })
 }
 
+#[cfg(not(wasm_browser))]
 pub fn cancel(store: &Store, id: &str) -> Result<()> {
     store.transaction(|entries| {
         let state = get(entries, id)?;
@@ -357,7 +365,7 @@ pub fn new_question(
     approval: bool,
 ) -> Question {
     Question {
-        id: disk::random_id(),
+        id: random_id(),
         title,
         body,
         source,

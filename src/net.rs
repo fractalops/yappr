@@ -1,13 +1,16 @@
 //! Endpoint setup and the local identity.
+#[cfg(not(wasm_browser))]
 use std::{fs, io::Write, net::Ipv4Addr, path::Path, str::FromStr};
 
 use anyhow::{Context, Result};
 use iroh::{
     endpoint::presets, Endpoint, EndpointAddr, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
+#[cfg(not(wasm_browser))]
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(wasm_browser))]
 use crate::{access::AccessHook, store};
 
 /// How the endpoint finds and reaches other endpoints.
@@ -73,19 +76,53 @@ impl RelaySettings {
         }
         Ok(())
     }
+    #[cfg(not(wasm_browser))]
     pub fn load(dir: &Path) -> Result<Self> {
         let settings: Self = crate::disk::read(&dir.join("network.json"))?;
         settings.validate()?;
         Ok(settings)
     }
+    #[cfg(not(wasm_browser))]
     pub fn save(&self, dir: &Path) -> Result<()> {
         self.validate()?;
         let _lock = crate::disk::lock(dir, "network.lock")?;
         crate::disk::write(&dir.join("network.json"), self)
     }
+
+    /// The relay mode of these settings. `None` keeps the preset relays.
+    fn relay_mode(&self) -> Result<Option<RelayMode>> {
+        self.validate()?;
+        if self.disabled {
+            return Ok(Some(RelayMode::Disabled));
+        }
+        if self.urls.is_empty() {
+            return Ok(None);
+        }
+        let urls: Vec<RelayUrl> = self
+            .urls
+            .iter()
+            .map(|s| s.parse())
+            .collect::<Result<_, _>>()?;
+        Ok(Some(RelayMode::Custom(RelayMap::from_iter(urls))))
+    }
+}
+
+/// Bind a browser endpoint. A browser reaches other endpoints through relays
+/// only, so `relays` must not disable them.
+#[cfg(wasm_browser)]
+pub async fn bind(secret: SecretKey, relays: &RelaySettings) -> Result<Endpoint> {
+    if relays.disabled {
+        anyhow::bail!("a browser needs a relay");
+    }
+    let mut builder = Endpoint::builder(presets::N0).secret_key(secret);
+    if let Some(mode) = relays.relay_mode()? {
+        builder = builder.relay_mode(mode);
+    }
+    Ok(builder.bind().await?)
 }
 
 /// Bind an endpoint. `hook` controls access to incoming connections.
+#[cfg(not(wasm_browser))]
 pub async fn bind(
     secret: SecretKey,
     opts: impl Into<NetOptions>,
@@ -110,16 +147,8 @@ pub async fn bind(
     if opts.network == Network::Local && !opts.relays.urls.is_empty() {
         anyhow::bail!("relay settings do not apply to loopback test mode");
     }
-    if opts.relays.disabled {
-        builder = builder.relay_mode(RelayMode::Disabled);
-    } else if !opts.relays.urls.is_empty() {
-        let urls: Vec<RelayUrl> = opts
-            .relays
-            .urls
-            .iter()
-            .map(|s| s.parse())
-            .collect::<Result<_, _>>()?;
-        builder = builder.relay_mode(RelayMode::Custom(RelayMap::from_iter(urls)));
+    if let Some(mode) = opts.relays.relay_mode()? {
+        builder = builder.relay_mode(mode);
     }
     if opts.mdns {
         builder = builder.address_lookup(MdnsAddressLookup::builder());
@@ -147,6 +176,7 @@ pub async fn addr(endpoint: &Endpoint) -> EndpointAddr {
 
 /// The secret key from `IROH_SECRET`, or from `<dir>/secret.key`. Create the
 /// file if it does not exist.
+#[cfg(not(wasm_browser))]
 pub fn load_or_create_secret(dir: &Path) -> Result<SecretKey> {
     if let Ok(secret) = std::env::var("IROH_SECRET") {
         return SecretKey::from_str(secret.trim()).context("IROH_SECRET is not a valid secret key");

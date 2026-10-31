@@ -8,8 +8,7 @@ use iroh::{
 };
 
 use crate::{
-    access::DENIED_CODE,
-    proto::{self, Frame, Request},
+    proto::{self, Frame, Request, DENIED_CODE},
     ALPN,
 };
 
@@ -109,7 +108,7 @@ pub async fn subscribe(
 
 async fn connect(endpoint: &Endpoint, addr: EndpointAddr, alpn: &[u8]) -> Result<Connection> {
     let writer = addr.id;
-    match tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, alpn)).await {
+    match n0_future::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, alpn)).await {
         Ok(Ok(conn)) => Ok(conn),
         Ok(Err(e)) => Err(Unreachable {
             writer,
@@ -195,7 +194,7 @@ impl Follower {
     pub async fn next(&mut self) -> Result<Option<Event>> {
         loop {
             if let Some(delay) = self.sleep.take() {
-                tokio::time::sleep(delay).await;
+                n0_future::time::sleep(delay).await;
             }
             let sub = match &mut self.sub {
                 Some(sub) => sub,

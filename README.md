@@ -2,7 +2,7 @@
 
 # Yappr
 
-**Give your scripts and agents a way to reach you—and get an answer.**
+**Give your scripts and agents a way to reach you and get an answer.**
 
 Yappr brings updates, questions, and approval requests from your machines to
 your other devices. A script can wait for your reply before it continues. Each

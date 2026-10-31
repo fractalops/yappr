@@ -383,24 +383,53 @@ fn raw_output_prints_bodies_only() {
 }
 
 #[test]
-fn pretty_output_uses_color_only_when_asked() {
+fn text_output_uses_color_only_when_asked() {
     let (writer, follower) = pair();
     writer.post("body", &["--kind", "alert", "--title", "disk full"]);
     let serve = Serve::start(&writer);
     let t = serve.ticket.as_str();
-    let plain = follower.run(["follow", t, "--no-follow", "--cursor", "a"]);
+    let plain = follower.run([
+        "follow",
+        t,
+        "--no-follow",
+        "--output",
+        "text",
+        "--cursor",
+        "a",
+    ]);
     assert!(!plain.contains('\x1b'), "{plain:?}");
     assert!(plain.contains("alert disk full"), "{plain:?}");
     let color = follower.run([
         "follow",
         t,
         "--no-follow",
+        "--output",
+        "text",
         "--color",
         "always",
         "--cursor",
         "b",
     ]);
     assert!(color.contains("\x1b[1;31malert\x1b[0m"), "{color:?}");
+}
+
+#[test]
+fn a_pipe_gets_json_lines_by_default() {
+    let (writer, follower) = pair();
+    writer.post("first", &[]);
+    writer.post("second", &["--title", "t"]);
+    let serve = Serve::start(&writer);
+    let out = follower.run(["follow", &serve.ticket, "--no-follow"]);
+    let bodies: Vec<String> = out
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["body"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(bodies, ["first", "second"]);
 }
 
 #[test]
@@ -892,6 +921,20 @@ fn questions_and_approvals_return_distinct_outcomes() {
         "approve",
     ]);
     assert_eq!(writer.run(["wait", approved.trim()]), "approve\n");
+
+    let states = writer.run(["questions"]);
+    assert_eq!(states.lines().count(), 3);
+    for line in states.lines() {
+        serde_json::from_str::<serde_json::Value>(line).unwrap();
+    }
+    let text = writer.run(["questions", "--output", "text"]);
+    assert!(
+        text.contains(&format!(
+            "answered  Deploy staging?  (answer: approve)  {}",
+            approved.trim()
+        )),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1020,6 +1063,9 @@ fn health_reports_the_selected_path_and_denied_access() {
     assert_eq!(health["health"]["state"], "connected");
     assert_eq!(health["health"]["route"], "direct");
     assert!(health["health"]["rtt_ms"].as_f64().unwrap() >= 0.0);
+    let text = device.run(["health", "laptop", "--output", "text"]);
+    assert!(text.starts_with("laptop: connected via direct ("), "{text}");
+    assert!(text.trim_end().ends_with(" ms"), "{text}");
     writer.run(["deny", &device.id()]);
     let (exit, output, _) = device.exit(["health", "laptop"], b"");
     assert_eq!(exit, 3);
@@ -1027,6 +1073,8 @@ fn health_reports_the_selected_path_and_denied_access() {
         serde_json::from_str::<serde_json::Value>(&output).unwrap()["health"]["state"],
         "denied"
     );
+    let (exit, output, _) = device.exit(["health", "laptop", "--output", "text"], b"");
+    assert_eq!((exit, output.as_str()), (3, "laptop: denied\n"));
 }
 #[test]
 fn relay_settings_persist_and_validate_without_replacing_good_settings() {

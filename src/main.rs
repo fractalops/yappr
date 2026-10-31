@@ -140,7 +140,12 @@ enum Commands {
   yappr approve laptop \"Deploy to production?\" && ./deploy")]
     Approve(ApprovalArgs),
     /// Read local questions and their current states.
-    Questions,
+    Questions {
+        /// The output format. The default is text for a terminal and one JSON
+        /// state per line for a pipe or a file.
+        #[clap(long, value_enum)]
+        output: Option<Format>,
+    },
     /// Wait for a local question's final decision.
     Wait { id: String },
     /// Cancel a local question.
@@ -176,8 +181,15 @@ enum Commands {
         #[clap(subcommand)]
         command: NetworkCommand,
     },
-    /// Probe a writer and print its connection health as JSON.
-    Health { target: String },
+    /// Probe a writer and print its connection health.
+    Health {
+        /// The alias, ID, or ticket of the writer.
+        target: String,
+        /// The output format. The default is text for a terminal and JSON for
+        /// a pipe or a file.
+        #[clap(long, value_enum)]
+        output: Option<Format>,
+    },
     /// Pair a device with an expiring invitation.
     #[clap(after_help = "Examples:
   yappr pair --alias laptop
@@ -191,6 +203,26 @@ enum Commands {
         #[clap(long)]
         alias: Option<String>,
     },
+}
+
+/// The output format of a command that prints states, not entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Format {
+    /// For people. The layout can change between versions.
+    Text,
+    /// One JSON object per line.
+    Json,
+}
+
+impl Format {
+    /// The chosen format, or text for a terminal and JSON for a pipe.
+    fn is_text(choice: Option<Format>) -> bool {
+        choice.unwrap_or(if io::stdout().is_terminal() {
+            Format::Text
+        } else {
+            Format::Json
+        }) == Format::Text
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -377,9 +409,10 @@ struct FollowArgs {
     #[clap(long)]
     kind: Vec<String>,
 
-    /// The output format.
-    #[clap(long, value_enum, default_value_t)]
-    output: Output,
+    /// The output format. The default is text for a terminal and JSON for a
+    /// pipe or a file.
+    #[clap(long, value_enum)]
+    output: Option<Output>,
 
     /// When to use color.
     #[clap(long, value_enum, default_value_t)]
@@ -680,6 +713,17 @@ async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
     }
     let endpoint = net::bind(common.secret()?, common.net(None)?, vec![], None).await?;
     let multiple = targets.len() > 1;
+    let output = Output::resolve(args.output, io::stdout().is_terminal());
+    let renderer = Renderer::new(
+        output,
+        output == Output::Text
+            && render::use_color(
+                args.color,
+                io::stdout().is_terminal(),
+                std::env::var("NO_COLOR").ok().as_deref(),
+            ),
+        TimeZone::system(),
+    );
     let mut tasks = tokio::task::JoinSet::new();
     for (label, addr) in targets {
         let mut req = Request {
@@ -708,16 +752,7 @@ async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
             source: args.source.clone(),
             kinds: args.kind.clone(),
             writer: multiple.then(|| label.clone()),
-            renderer: Renderer {
-                output: args.output,
-                color: args.output == Output::Pretty
-                    && render::use_color(
-                        args.color,
-                        io::stdout().is_terminal(),
-                        std::env::var("NO_COLOR").ok().as_deref(),
-                    ),
-                tz: TimeZone::system(),
-            },
+            renderer: renderer.clone(),
         };
         let status = !args.no_follow && io::stderr().is_terminal();
         let mut follower = Follower::new(endpoint.clone(), addr, req);
@@ -773,7 +808,45 @@ async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
     failure.map_or(Ok(()), Err)
 }
 
-async fn probe(common: &CommonArgs, target: &str) -> Result<()> {
+/// One question for people: status, title, the choices or the answer, then
+/// the full ID for `wait`, `cancel`, and `answer`.
+fn question_line(state: &choices::QuestionState) -> String {
+    let detail = match &state.decision {
+        Some(decision) => format!("answer: {}", decision.value),
+        None => {
+            let values: Vec<&str> = state
+                .question
+                .options
+                .iter()
+                .map(|o| o.value.as_str())
+                .collect();
+            format!("choices: {}", values.join(", "))
+        }
+    };
+    format!(
+        "{:<9} {}  ({detail})  {}",
+        state.status, state.question.title, state.question.id
+    )
+}
+
+/// Connection health for people. A failure gives the state only, because the
+/// error goes to stderr.
+fn health_line(target: &str, health: &yappr::health::Health) -> String {
+    let mut line = format!("{target}: {}", health.state);
+    if let Some(route) = &health.route {
+        line.push_str(&format!(" via {route}"));
+    }
+    if let Some(address) = &health.address {
+        let address = address.strip_prefix("relay:").unwrap_or(address);
+        line.push_str(&format!(" ({address})"));
+    }
+    if let Some(rtt) = health.rtt_ms {
+        line.push_str(&format!(", round trip {rtt:.0} ms"));
+    }
+    line
+}
+
+async fn probe(common: &CommonArgs, target: &str, text: bool) -> Result<()> {
     let addr = peers::resolve(&common.dir()?, target)?;
     let writer = addr.id;
     let endpoint = net::bind(common.secret()?, common.net(None)?, vec![], None).await?;
@@ -794,12 +867,16 @@ async fn probe(common: &CommonArgs, target: &str) -> Result<()> {
                         .connection()
                         .context("the writer closed its connection")?,
                 );
-                println!(
-                    "{}",
-                    serde_json::to_string(
-                        &serde_json::json!({"writer": writer, "alias": target, "health": health})
-                    )?
-                );
+                if text {
+                    println!("{}", health_line(target, &health));
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string(
+                            &serde_json::json!({"writer": writer, "alias": target, "health": health})
+                        )?
+                    );
+                }
                 return Ok(());
             }
         }
@@ -816,12 +893,16 @@ async fn probe(common: &CommonArgs, target: &str) -> Result<()> {
             format!("{error:#}"),
             None,
         );
-        println!(
-            "{}",
-            serde_json::to_string(
-                &serde_json::json!({"writer": writer, "alias": target, "health": health})
-            )?
-        );
+        if text {
+            println!("{}", health_line(target, &health));
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &serde_json::json!({"writer": writer, "alias": target, "health": health})
+                )?
+            );
+        }
     }
     endpoint.close().await;
     result
@@ -1211,9 +1292,14 @@ async fn run(args: Args) -> Result<()> {
         Commands::Approve(args) => {
             ask(common, args.question, choices::approval_options(), true).await
         }
-        Commands::Questions => {
+        Commands::Questions { output } => {
+            let text = Format::is_text(output);
             for state in choices::list(&common.store()?.entries()?) {
-                println!("{}", serde_json::to_string(&state)?);
+                if text {
+                    println!("{}", question_line(&state));
+                } else {
+                    println!("{}", serde_json::to_string(&state)?);
+                }
             }
             Ok(())
         }
@@ -1257,7 +1343,9 @@ async fn run(args: Args) -> Result<()> {
                 .save(&common.dir()?)
             }
         },
-        Commands::Health { target } => probe(common, &target).await,
+        Commands::Health { target, output } => {
+            probe(common, &target, Format::is_text(output)).await
+        }
         Commands::Ticket => {
             let addr = EndpointAddr::new(common.secret()?.public());
             println!("{}", EndpointTicket::new(addr));

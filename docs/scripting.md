@@ -7,9 +7,25 @@ These rules define the scripting interface.
 entries. `id`, `ticket` and `devices` print their values. All status messages,
 warnings and errors go to stderr.
 
-**Single-writer `--output json` prints one entry per line** (NDJSON), with no color and no
-other lines. Each entry has the format below. The feed file on the writer has
-the same format.
+**Text is for people. JSON is for programs.** When stdout is a terminal,
+`follow`, `questions` and `health` print text. When stdout is a pipe or a file,
+they print one JSON object per line. The text layout can change between
+versions. Do not parse it. In a script, write `--output json` so that the
+format does not depend on where the output goes.
+
+| Command | Terminal | Pipe or file |
+|---|---|---|
+| `follow` | text, one line for each one-line entry | JSON, one entry per line |
+| `questions`, `health` | text | JSON, one object per line |
+| `devices` | a table with short IDs | tab-separated lines with full IDs |
+| `post`, `ask`, `answer`, `id`, `ticket` | one value | the same value |
+
+`--output text`, `--output json` and, for `follow`, `--output raw` select a
+format for any destination. `--output raw` prints the bodies only.
+
+**`follow --output json` prints one entry per line** (NDJSON), with no color
+and no other lines. Each entry has the format below. The feed file on the
+writer has the same format.
 
 **The entry format:**
 
@@ -81,7 +97,7 @@ Each question accepts two to twelve choices.
 Without `--no-wait`, the command prints the selected value after the writer saves a decision.
 With `--no-wait`, it prints the question ID and returns immediately.
 Use `yappr wait ID` to read the result later.
-`yappr questions` prints one question state per JSON line.
+`yappr questions --output json` prints one question state per line.
 Use `yappr cancel ID` to cancel a pending question.
 
 A generic choice named `reject` still returns code 0.
@@ -139,9 +155,9 @@ One failed writer does not stop another writer's task.
 Multiple writers add a `writer` and `entry` envelope to JSON output.
 The `writer` field contains the supplied alias or the full endpoint ID.
 Single-writer output keeps its existing format.
-Pretty and raw output use a `[writer]` prefix for each entry.
+Text and raw output use a `[writer]` prefix for each entry.
 
-Use `yappr health laptop` for a read-only JSON connection probe.
+Use `yappr health laptop` for a read-only connection probe.
 Its result includes the writer identity, connection state, selected route, address, and round-trip time.
 A denied probe returns 3. An unreachable probe returns 5.
 The probe leaves all cursors unchanged.

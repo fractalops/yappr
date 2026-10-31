@@ -1,16 +1,14 @@
 # Yappr
 
-Yappr sends you updates and questions from your own machines.
+Yappr brings updates, questions, and approval requests from your machines to
+your other devices. A script can wait for your reply before it continues. Each
+machine keeps its feed, so devices that were offline catch up when they
+reconnect.
 
-A program on one machine posts entries to a feed, and your other devices read
-them. A script can also ask you a question and wait until you answer from
-another device. The feed keeps every entry, so a device that was offline
-catches up when it connects again.
-
-Yappr connects your devices directly with iroh. When a direct connection is
-not possible, for example behind a strict firewall, the traffic goes through a
-relay. The relay passes on encrypted data and cannot read it. You do not need
-an account, and no Yappr server sits between your devices.
+Your devices connect directly over iroh where possible. Otherwise, an iroh
+relay server forwards their end-to-end encrypted traffic. The relay cannot read
+your entries or answers, and it does not store your feed. You need no account
+or hosted feed service.
 
 ```sh
 df -h / | yappr post --source disk --title "Disk usage"

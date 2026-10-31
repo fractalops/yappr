@@ -52,7 +52,8 @@ tail -F /var/log/app.log | yappr post --every 5s --source app
 ```
 
 `--lines` posts each line. `--every 5s` collects the lines of each 5 seconds
-into one entry.
+into one entry. These entries have the kind `log`. To read a feed without its
+log streams, use `yappr follow server --not-kind log`.
 
 ### Ask before a deploy
 

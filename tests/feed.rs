@@ -284,6 +284,77 @@ async fn deny_closes_a_live_feed_before_the_next_entry() {
 }
 
 #[tokio::test]
+async fn the_writer_sends_only_the_entries_that_match_the_filter() {
+    let writer = Writer::start().await;
+    let post = |source: &str, kind: &str, body: &str| {
+        writer
+            .store
+            .append(Draft {
+                kind: kind.into(),
+                ..draft(source, body)
+            })
+            .unwrap()
+    };
+    post("nginx", "log", "GET /");
+    post("disk", "warn", "92%");
+    post("nginx", "log", "GET /a");
+    post("backup", "info", "done");
+    let f = follower().await;
+    writer.allow(&f);
+    let inbox = Request {
+        not_kinds: vec!["log".into()],
+        ..Default::default()
+    };
+    let mut sub = subscribe(&writer, &f, inbox).await;
+    let bodies: Vec<String> = entries(&mut sub, 2)
+        .await
+        .into_iter()
+        .map(|e| e.body)
+        .collect();
+    assert_eq!(bodies, ["92%", "done"]);
+    // The live tail uses the same filter.
+    post("nginx", "log", "GET /b");
+    post("disk", "alert", "99%");
+    assert_eq!(entries(&mut sub, 1).await[0].body, "99%");
+
+    let disk = Request {
+        kinds: vec!["warn".into(), "alert".into()],
+        source: Some("^disk$".into()),
+        ..once()
+    };
+    let frames = drain(subscribe(&writer, &f, disk).await).await;
+    assert_eq!(ids(&frames), vec![2, 6]);
+    // The resume position comes from the last entry that the follower got.
+    let resumed = Request {
+        since: 2,
+        not_kinds: vec!["log".into()],
+        ..once()
+    };
+    assert_eq!(
+        ids(&drain(subscribe(&writer, &f, resumed).await).await),
+        vec![4, 6]
+    );
+}
+
+#[tokio::test]
+async fn a_bad_source_filter_is_an_error_from_the_writer() {
+    let writer = Writer::start().await;
+    writer.post("s", "hello");
+    let f = follower().await;
+    writer.allow(&f);
+    let bad = Request {
+        source: Some("(".into()),
+        ..once()
+    };
+    let mut sub = subscribe(&writer, &f, bad).await;
+    let err = timeout(WAIT, sub.next())
+        .await
+        .expect("timed out")
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("not a valid regex"), "{err:#}");
+}
+
+#[tokio::test]
 async fn writer_restart_keeps_entries_and_ids() {
     let writer = Writer::start().await;
     writer.post("s", "before");

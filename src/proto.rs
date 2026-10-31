@@ -3,7 +3,7 @@
 //! The follower opens one bidirectional stream and sends one [`Request`].
 //! The server sends [`Frame`]s until the request is complete. Each frame is a
 //! u32 big-endian length, then that many bytes of JSON.
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use jiff::Timestamp;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -33,6 +33,58 @@ pub struct Request {
     /// After the replay, wait for new entries and send them.
     #[serde(default = "yes")]
     pub follow: bool,
+    /// Send only entries of these kinds. Empty means all kinds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
+    /// Do not send entries of these kinds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_kinds: Vec<String>,
+    /// Send only entries with a source that matches this regex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// The largest compiled source regex, in bytes. The regex comes from another
+/// device, so the writer limits the memory that it can use.
+const MAX_SOURCE_REGEX: usize = 64 * 1024;
+
+/// The entry filter of a [`Request`].
+#[derive(Debug, Clone)]
+pub struct Filter {
+    kinds: Vec<String>,
+    not_kinds: Vec<String>,
+    source: Option<regex::Regex>,
+}
+
+impl Filter {
+    /// Build the filter. An invalid or too large source regex is an error.
+    pub fn new(req: &Request) -> Result<Self> {
+        let source = req
+            .source
+            .as_deref()
+            .map(|pattern| {
+                regex::RegexBuilder::new(pattern)
+                    .size_limit(MAX_SOURCE_REGEX)
+                    .dfa_size_limit(MAX_SOURCE_REGEX)
+                    .build()
+                    .context("the source filter is not a valid regex")
+            })
+            .transpose()?;
+        Ok(Self {
+            kinds: req.kinds.clone(),
+            not_kinds: req.not_kinds.clone(),
+            source,
+        })
+    }
+
+    pub fn matches(&self, entry: &Entry) -> bool {
+        (self.kinds.is_empty() || self.kinds.contains(&entry.kind))
+            && !self.not_kinds.contains(&entry.kind)
+            && self
+                .source
+                .as_ref()
+                .is_none_or(|re| re.is_match(&entry.source))
+    }
 }
 
 fn yes() -> bool {
@@ -47,6 +99,9 @@ impl Default for Request {
             tail: None,
             limit: None,
             follow: true,
+            kinds: Vec::new(),
+            not_kinds: Vec::new(),
+            source: None,
         }
     }
 }
@@ -163,6 +218,59 @@ mod tests {
         let req: Request = serde_json::from_str("{}").unwrap();
         assert_eq!(req, Request::default());
         assert!(req.follow);
+    }
+
+    #[test]
+    fn filter_checks_kinds_and_source() {
+        let entry = |kind: &str, source: &str| Entry {
+            v: crate::entry::SCHEMA_VERSION,
+            id: 1,
+            time: Timestamp::UNIX_EPOCH,
+            source: source.into(),
+            kind: kind.into(),
+            title: None,
+            body: "x".into(),
+            extra: Default::default(),
+        };
+        let all = Filter::new(&Request::default()).unwrap();
+        assert!(all.matches(&entry("log", "nginx")));
+        let inbox = Filter::new(&Request {
+            not_kinds: vec!["log".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!inbox.matches(&entry("log", "nginx")));
+        assert!(inbox.matches(&entry("question", "yappr")));
+        let alerts = Filter::new(&Request {
+            kinds: vec!["warn".into(), "alert".into()],
+            source: Some("^disk$".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(alerts.matches(&entry("alert", "disk")));
+        assert!(!alerts.matches(&entry("alert", "diskette")));
+        assert!(!alerts.matches(&entry("info", "disk")));
+    }
+
+    #[test]
+    fn filter_rejects_a_bad_or_large_regex() {
+        let with = |source: &str| {
+            Filter::new(&Request {
+                source: Some(source.into()),
+                ..Default::default()
+            })
+        };
+        assert!(with("(").is_err());
+        assert!(with(&"a{1000}".repeat(100)).is_err());
+    }
+
+    #[test]
+    fn request_without_filters_has_no_filter_fields() {
+        let json = serde_json::to_string(&Request::default()).unwrap();
+        assert!(
+            !json.contains("kinds") && !json.contains("source"),
+            "{json}"
+        );
     }
 
     #[test]

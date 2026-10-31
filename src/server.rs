@@ -224,7 +224,10 @@ impl FeedProtocol {
             reader: Some(self.store.reader()?),
             pending: VecDeque::new(),
         };
-        let wanted = |e: &Entry| e.id > req.since && req.since_time.is_none_or(|t| e.time >= t);
+        let filter = proto::Filter::new(&req)?;
+        let wanted = |e: &Entry| {
+            e.id > req.since && req.since_time.is_none_or(|t| e.time >= t) && filter.matches(e)
+        };
         let mut budget = req.limit.unwrap_or(u64::MAX);
 
         // Replay up to the current head.

@@ -433,6 +433,55 @@ fn a_pipe_gets_json_lines_by_default() {
 }
 
 #[test]
+fn streamed_lines_are_logs_and_not_kind_hides_them() {
+    let (writer, follower) = pair();
+    assert_eq!(
+        writer
+            .exit(["post", "--lines", "--source", "nginx"], b"GET /\nGET /a\n")
+            .0,
+        0
+    );
+    writer.post("disk full", &["--kind", "warn"]);
+    assert_eq!(
+        writer
+            .exit(
+                ["post", "--lines", "--kind", "info", "--source", "app"],
+                b"started\n"
+            )
+            .0,
+        0
+    );
+    let serve = Serve::start(&writer);
+    let kinds = |args: &[&str]| -> Vec<String> {
+        let mut full = vec![
+            "follow",
+            serve.ticket.as_str(),
+            "--no-follow",
+            "--output",
+            "json",
+        ];
+        full.extend_from_slice(args);
+        follower
+            .run(full)
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+    assert_eq!(kinds(&["--cursor", "a"]), ["log", "log", "warn", "info"]);
+    assert_eq!(
+        kinds(&["--cursor", "b", "--not-kind", "log"]),
+        ["warn", "info"]
+    );
+    // The writer checked every entry, so the cursor is past the logs too.
+    assert!(kinds(&["--cursor", "b"]).is_empty());
+}
+
+#[test]
 fn disallowed_follower_gets_nothing() {
     let writer = Machine::new();
     let stranger = Machine::new();

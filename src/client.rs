@@ -211,6 +211,9 @@ impl Follower {
                     return Ok(Some(Event::Entry(entry)));
                 }
                 Ok(Some(Frame::CaughtUp { head })) => {
+                    // The writer checked every entry up to `head`, also the
+                    // entries that the filter left out.
+                    self.req.since = self.req.since.max(head);
                     self.backoff = MIN_BACKOFF;
                     return Ok(Some(Event::CaughtUp { head }));
                 }

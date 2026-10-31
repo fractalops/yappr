@@ -39,7 +39,7 @@ writer has the same format.
 | `id`     | integer | 1, 2, 3 and so on, in the order of the writer               |
 | `time`   | string  | RFC 3339 time in UTC, set by the writer                     |
 | `source` | string  | 1 to 64 bytes, one line                                     |
-| `kind`   | string  | 1 to 32 bytes, one line. Usual values: `info`, `warn`, `alert` |
+| `kind`   | string  | 1 to 32 bytes, one line. Usual values: `info`, `log`, `warn`, `alert` |
 | `title`  | string  | optional, at most 256 bytes, one line                       |
 | `body`   | string  | at most 256 KiB. Newline and tab are the only control characters |
 
@@ -170,7 +170,12 @@ Several feeds print entries as they arrive. They do not guarantee a shared time 
 `follow` saves its position after each entry and resumes there after a failure.
 `--since ID|DURATION|TIME` and `--tail N` do not change the saved position.
 Use `--cursor NAME` for an independent position, for example one for a script.
-Use `--source REGEX` and `--kind KIND` to filter output. `--output raw` prints bodies only.
+Use `--source REGEX`, `--kind KIND` and `--not-kind KIND` to filter output. `--output raw` prints bodies only.
+The writer applies these filters, so entries that the filter leaves out do not cross the network.
+After the replay, the cursor moves past every entry that the writer checked, also the entries that the filter left out.
+
+`post --lines` and `post --every` give their entries the kind `log`, unless you give `--kind`.
+Use `--not-kind log` to read a feed without its log streams.
 
 ## Devices and access
 

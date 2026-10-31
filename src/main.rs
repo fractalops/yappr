@@ -346,9 +346,10 @@ struct PostArgs {
     #[clap(long)]
     title: Option<String>,
 
-    /// The kind of entry. Followers color "warn" and "alert".
-    #[clap(long, default_value = "info")]
-    kind: String,
+    /// The kind of entry. Followers color "warn" and "alert". The default is
+    /// "log" with --lines or --every, and "info" otherwise.
+    #[clap(long)]
+    kind: Option<String>,
 
     /// The body. If you do not give it, the body comes from stdin.
     #[clap(long)]
@@ -408,6 +409,11 @@ struct FollowArgs {
     /// Print only the entries of this kind. Use the option again for more kinds.
     #[clap(long)]
     kind: Vec<String>,
+
+    /// Do not print the entries of this kind, for example "log". Use the
+    /// option again for more kinds.
+    #[clap(long, value_name = "KIND")]
+    not_kind: Vec<String>,
 
     /// The output format. The default is text for a terminal and JSON for a
     /// pipe or a file.
@@ -505,9 +511,13 @@ async fn post(common: &CommonArgs, args: PostArgs) -> Result<()> {
         // posts the waiting lines.
         let stop = ctrl_c_now()?;
         let store = common.store()?;
+        let kind = match mode {
+            Mode::Lines | Mode::Every(_) => "log",
+            Mode::Json => "info",
+        };
         let defaults = Draft {
             source: args.source.unwrap_or_else(hostname),
-            kind: args.kind,
+            kind: args.kind.unwrap_or_else(|| kind.into()),
             title: args.title,
             body: String::new(),
             extra: Default::default(),
@@ -533,7 +543,7 @@ async fn post(common: &CommonArgs, args: PostArgs) -> Result<()> {
     let source = args.source.unwrap_or_else(hostname);
     let draft = Draft {
         source,
-        kind: args.kind,
+        kind: args.kind.unwrap_or_else(|| "info".into()),
         title: args.title,
         body,
         extra: Default::default(),
@@ -652,18 +662,27 @@ async fn serve(common: &CommonArgs, args: ServeArgs) -> Result<()> {
 /// Prints the entries that pass the filters, and moves the cursor.
 struct Printer {
     cursor: Option<Cursor>,
-    source: Option<Regex>,
-    kinds: Vec<String>,
+    /// The writer applies the same filter. A writer that does not know the
+    /// filter fields sends all entries, so the follower checks them again.
+    filter: yappr::proto::Filter,
     renderer: Renderer,
     writer: Option<String>,
 }
 
 impl Printer {
     fn wants(&self, entry: &Entry) -> bool {
-        self.source
-            .as_ref()
-            .is_none_or(|re| re.is_match(&entry.source))
-            && (self.kinds.is_empty() || self.kinds.contains(&entry.kind))
+        self.filter.matches(entry)
+    }
+
+    /// Move the cursor to `head`. The writer checked every entry up to there,
+    /// also the entries that the filter left out. The cursor never moves back.
+    fn passed(&self, head: u64) -> Result<()> {
+        if let Some(cursor) = &self.cursor {
+            if head > cursor.load()? {
+                cursor.save(head)?;
+            }
+        }
+        Ok(())
     }
 
     /// Print one entry, then move the cursor past it.
@@ -729,6 +748,9 @@ async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
         let mut req = Request {
             follow: !args.no_follow,
             tail: args.tail,
+            kinds: args.kind.clone(),
+            not_kinds: args.not_kind.clone(),
+            source: args.source.as_ref().map(|re| re.as_str().to_string()),
             ..Default::default()
         };
         let cursor = match args.since {
@@ -749,8 +771,7 @@ async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
         };
         let printer = Printer {
             cursor,
-            source: args.source.clone(),
-            kinds: args.kind.clone(),
+            filter: yappr::proto::Filter::new(&req)?,
             writer: multiple.then(|| label.clone()),
             renderer: renderer.clone(),
         };
@@ -763,6 +784,7 @@ async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
                     match event {
                         Event::Entry(entry) => printer.print(&entry)?,
                         Event::CaughtUp { head } => {
+                            printer.passed(head)?;
                             if status && !caught_up {
                                 let health =
                                     follower.connection().map(|c| yappr::health::snapshot(&c));

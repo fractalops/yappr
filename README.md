@@ -44,16 +44,15 @@ server$ echo "Backup complete" | yappr post --source backup
 
 ## Examples
 
-### Stream a log
+### Post a command's output
 
 ```sh
-journalctl -f -u nginx | yappr post --lines --source nginx
-tail -F /var/log/app.log | yappr post --every 5s --source app
+df -h / | yappr post --source disk --title "Disk usage"
+uptime | yappr post --source server --kind warn --title "Load is high"
 ```
 
-`--lines` posts each line. `--every 5s` collects the lines of each 5 seconds
-into one entry. These entries have the kind `log`. To read a feed without its
-log streams, use `yappr follow server --not-kind log`.
+`post` reads all of stdin and adds it as one entry. The feed keeps every
+entry, so post events, not a live log stream.
 
 ### Ask before a deploy
 

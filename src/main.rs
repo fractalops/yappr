@@ -18,7 +18,7 @@ use yappr::{
     cursor::Cursor,
     disk,
     entry::{self, Draft, Entry, Invalid},
-    ingest::{self, Mode, Rejected},
+    ingest::{self, Rejected},
     net::{self, NetOptions, Network},
     outbox, pairing, peers,
     proto::Request,
@@ -88,7 +88,7 @@ enum Commands {
     /// have to run.
     #[clap(after_help = "Examples:
   df -h / | yappr post --source disk --title \"Disk usage\"
-  journalctl -f -u nginx | yappr post --lines --source nginx")]
+  yappr follow laptop --output json | jq -c 'select(.kind == \"alert\")' | yappr post --json")]
     Post(PostArgs),
 
     /// Serve the local feed to the allowed followers.
@@ -346,34 +346,18 @@ struct PostArgs {
     #[clap(long)]
     title: Option<String>,
 
-    /// The kind of entry. Followers color "warn" and "alert". The default is
-    /// "log" with --lines or --every, and "info" otherwise.
-    #[clap(long)]
-    kind: Option<String>,
+    /// The kind of entry. Followers color "warn" and "alert".
+    #[clap(long, default_value = "info")]
+    kind: String,
 
     /// The body. If you do not give it, the body comes from stdin.
     #[clap(long)]
     body: Option<String>,
 
-    /// Post each line of stdin as one entry, when the line arrives. post
-    /// skips blank lines.
-    #[clap(long, conflicts_with = "body")]
-    lines: bool,
-
-    /// Like --lines, but post the lines that arrive within DURATION (for
-    /// example 2s or 1m) as one entry.
-    #[clap(
-        long,
-        value_name = "DURATION",
-        value_parser = parse_interval,
-        conflicts_with_all = ["body", "json"]
-    )]
-    every: Option<Duration>,
-
     /// Post each line of stdin as one entry in JSON, the format of "follow
     /// --output json". A field that a line does not have comes from the
     /// options.
-    #[clap(long, conflicts_with_all = ["body", "lines"])]
+    #[clap(long, conflicts_with = "body")]
     json: bool,
 }
 
@@ -500,31 +484,20 @@ impl CommonArgs {
 }
 
 async fn post(common: &CommonArgs, args: PostArgs) -> Result<()> {
-    let mode = match (args.lines, args.every, args.json) {
-        (_, Some(interval), _) => Some(Mode::Every(interval)),
-        (_, _, true) => Some(Mode::Json),
-        (true, _, _) => Some(Mode::Lines),
-        _ => None,
-    };
-    if let Some(mode) = mode {
-        // Install the handler before anything else, so that Ctrl-C always
-        // posts the waiting lines.
+    if args.json {
+        // Install the handler before anything else, so that Ctrl-C stops
+        // between two entries and not in the middle of one.
         let stop = ctrl_c_now()?;
         let store = common.store()?;
-        let kind = match mode {
-            Mode::Lines | Mode::Every(_) => "log",
-            Mode::Json => "info",
-        };
         let defaults = Draft {
             source: args.source.unwrap_or_else(hostname),
-            kind: args.kind.unwrap_or_else(|| kind.into()),
+            kind: args.kind,
             title: args.title,
             body: String::new(),
             extra: Default::default(),
         };
         return ingest::run(
             &store,
-            mode,
             &defaults,
             io::stdin(),
             &mut io::stdout(),
@@ -543,7 +516,7 @@ async fn post(common: &CommonArgs, args: PostArgs) -> Result<()> {
     let source = args.source.unwrap_or_else(hostname);
     let draft = Draft {
         source,
-        kind: args.kind.unwrap_or_else(|| "info".into()),
+        kind: args.kind,
         title: args.title,
         body,
         extra: Default::default(),

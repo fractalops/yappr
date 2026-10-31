@@ -433,24 +433,12 @@ fn a_pipe_gets_json_lines_by_default() {
 }
 
 #[test]
-fn streamed_lines_are_logs_and_not_kind_hides_them() {
+fn not_kind_hides_a_kind_and_moves_the_cursor_past_it() {
     let (writer, follower) = pair();
-    assert_eq!(
-        writer
-            .exit(["post", "--lines", "--source", "nginx"], b"GET /\nGET /a\n")
-            .0,
-        0
-    );
+    writer.post("GET /", &["--kind", "log"]);
     writer.post("disk full", &["--kind", "warn"]);
-    assert_eq!(
-        writer
-            .exit(
-                ["post", "--lines", "--kind", "info", "--source", "app"],
-                b"started\n"
-            )
-            .0,
-        0
-    );
+    writer.post("GET /a", &["--kind", "log"]);
+    writer.post("started", &[]);
     let serve = Serve::start(&writer);
     let kinds = |args: &[&str]| -> Vec<String> {
         let mut full = vec![
@@ -472,7 +460,7 @@ fn streamed_lines_are_logs_and_not_kind_hides_them() {
             })
             .collect()
     };
-    assert_eq!(kinds(&["--cursor", "a"]), ["log", "log", "warn", "info"]);
+    assert_eq!(kinds(&["--cursor", "a"]), ["log", "warn", "log", "info"]);
     assert_eq!(
         kinds(&["--cursor", "b", "--not-kind", "log"]),
         ["warn", "info"]
@@ -738,7 +726,7 @@ fn a_restart_on_a_fixed_port_keeps_the_ticket_valid() {
     assert_eq!(v["body"], "after");
 }
 
-// Streaming input to post.
+// JSON input to post.
 
 /// The entries of a feed, read from its log file.
 fn log_entries(m: &Machine) -> Vec<serde_json::Value> {
@@ -753,118 +741,6 @@ fn bodies(m: &Machine) -> Vec<String> {
         .iter()
         .map(|e| e["body"].as_str().unwrap().to_string())
         .collect()
-}
-
-#[test]
-fn post_lines_makes_one_entry_per_line() {
-    let m = Machine::new();
-    let (code, stdout, stderr) = m.exit(
-        ["post", "--lines", "--source", "log"],
-        b"first\n\nsecond\r\nthird",
-    );
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(stdout, "1\n2\n3\n");
-    assert_eq!(bodies(&m), ["first", "second", "third"]);
-    assert!(log_entries(&m).iter().all(|e| e["source"] == "log"));
-}
-
-#[test]
-fn post_lines_posts_each_line_when_it_arrives() {
-    let m = Machine::new();
-    let mut child = m
-        .command(&["post", "--lines"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut ids = BufReader::new(child.stdout.take().unwrap()).lines();
-    use std::io::Write;
-    writeln!(stdin, "one").unwrap();
-    // stdin is still open, and the entry is already in the feed
-    assert_eq!(ids.next().unwrap().unwrap(), "1");
-    assert_eq!(bodies(&m), ["one"]);
-    writeln!(stdin, "two").unwrap();
-    assert_eq!(ids.next().unwrap().unwrap(), "2");
-    drop(stdin);
-    assert!(child.wait().unwrap().success());
-}
-
-#[test]
-fn post_lines_skips_a_bad_line_and_exits_4() {
-    let m = Machine::new();
-    let (code, stdout, stderr) = m.exit(["post", "--lines"], b"ok\n\x1b[31mred\x1b[0m\nalso ok\n");
-    assert_eq!(code, 4, "{stderr}");
-    assert_eq!(stdout, "1\n2\n");
-    assert_eq!(bodies(&m), ["ok", "also ok"]);
-    assert!(stderr.contains("line 2"), "{stderr}");
-    assert!(stderr.contains("U+001B"), "{stderr}");
-}
-
-#[test]
-fn post_every_groups_lines_into_one_entry() {
-    let m = Machine::new();
-    let (code, stdout, stderr) = m.exit(["post", "--every", "1m"], b"a\nb\nc\n");
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(stdout, "1\n");
-    assert_eq!(bodies(&m), ["a\nb\nc"]);
-}
-
-#[test]
-fn post_every_starts_a_new_entry_after_the_interval() {
-    let m = Machine::new();
-    let mut child = m
-        .command(&["post", "--every", "300ms"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut ids = BufReader::new(child.stdout.take().unwrap()).lines();
-    use std::io::Write;
-    writeln!(stdin, "a").unwrap();
-    writeln!(stdin, "b").unwrap();
-    // the interval ends, and post writes the first entry with stdin still open
-    assert_eq!(ids.next().unwrap().unwrap(), "1");
-    writeln!(stdin, "c").unwrap();
-    drop(stdin);
-    assert_eq!(ids.next().unwrap().unwrap(), "2");
-    assert!(child.wait().unwrap().success());
-    assert_eq!(bodies(&m), ["a\nb", "c"]);
-}
-
-#[cfg(unix)]
-#[test]
-fn post_every_posts_pending_lines_on_ctrl_c() {
-    let m = Machine::new();
-    let mut child = m
-        .command(&["post", "--every", "1h"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    use std::io::Write;
-    writeln!(stdin, "pending").unwrap();
-    stdin.flush().unwrap();
-    // post opens the feed after it installs its Ctrl-C handler
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !m.dir.path().join("feed.ndjson").exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "post did not open the feed"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    // let post read the line
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .unwrap();
-    let status = child.wait().unwrap();
-    assert!(status.success(), "{status:?}");
-    assert_eq!(bodies(&m), ["pending"]);
 }
 
 #[test]
@@ -916,10 +792,20 @@ fn post_json_relays_another_feed() {
 }
 
 #[test]
-fn post_stream_options_do_not_mix() {
+fn post_json_does_not_take_a_body() {
     let m = Machine::new();
-    assert_eq!(m.exit(["post", "--json", "--every", "1s"], b"").0, 2);
-    assert_eq!(m.exit(["post", "--lines", "--body", "x"], b"").0, 2);
+    assert_eq!(m.exit(["post", "--json", "--body", "x"], b"").0, 2);
+}
+
+#[test]
+fn post_json_accepts_a_line_larger_than_a_body() {
+    // An entry is at most 768 KiB as JSON, and a body at most 256 KiB. A line
+    // with a small body and a large extra field is a valid entry.
+    let m = Machine::new();
+    let line = serde_json::json!({"source": "big", "body": "x", "extra": "y".repeat(300 * 1024)});
+    let (code, stdout, stderr) = m.exit(["post", "--json"], format!("{line}\n").as_bytes());
+    assert_eq!((code, stdout.trim()), (0, "1"), "{stderr}");
+    assert_eq!(bodies(&m), ["x"]);
 }
 
 #[test]

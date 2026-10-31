@@ -1,30 +1,17 @@
-//! Streaming input for `post`: one entry per line, lines grouped by time, or
-//! one JSON entry per line.
+//! `post --json`: one entry for each JSON line of the input.
 use std::{
     fmt,
     future::Future,
     io::{self, BufRead, BufReader, Read, Write},
-    time::Duration,
 };
 
 use anyhow::Result;
-use tokio::{sync::mpsc, time::Instant};
+use tokio::sync::mpsc;
 
 use crate::{
     entry::{self, Draft, Invalid},
     store::Store,
 };
-
-/// How `post` turns input lines into entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    /// Each line is the body of one entry.
-    Lines,
-    /// The lines that arrive within the interval are the body of one entry.
-    Every(Duration),
-    /// Each line is one entry as a JSON object.
-    Json,
-}
 
 /// Some input lines were not valid, so they are not in the feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,15 +34,11 @@ enum Input {
     Failed(io::Error),
 }
 
-/// Post entries from `input` until it ends or `stop` completes. Write the id
-/// of each new entry to `out`, and each skipped line to `err`.
-///
-/// Fields that a line does not give come from `defaults`. In [`Mode::Every`],
-/// the lines that wait for the end of the interval are posted at the end of
-/// the input and when `stop` completes.
+/// Post one entry for each JSON line of `input`, until the input ends or
+/// `stop` completes. Write the id of each new entry to `out`, and each skipped
+/// line to `err`. Fields that a line does not give come from `defaults`.
 pub async fn run(
     store: &Store,
-    mode: Mode,
     defaults: &Draft,
     input: impl Read + Send + 'static,
     out: &mut impl Write,
@@ -73,69 +56,24 @@ pub async fn run(
         err,
         rejected: 0,
     };
-    let mut batch = Batch::default();
     tokio::pin!(stop);
     loop {
-        let deadline = batch.deadline;
         tokio::select! {
             _ = &mut stop => break,
-            _ = sleep_until(deadline), if deadline.is_some() => post.batch(&mut batch, defaults)?,
             input = rx.recv() => match input {
                 None => break,
                 Some(Input::Failed(e)) => return Err(e.into()),
-                Some(Input::Bad(n, invalid)) => post.skip(&format!("line {n}"), &invalid, 1)?,
-                Some(Input::Line(n, line)) => match mode {
-                    Mode::Lines => {
-                        let draft = Draft { body: line, ..defaults.clone() };
-                        post.one(draft, &format!("line {n}"), 1)?;
-                    }
-                    Mode::Json => match Draft::from_json(&line, defaults) {
-                        Ok(draft) => post.one(draft, &format!("line {n}"), 1)?,
-                        Err(invalid) => post.skip(&format!("line {n}"), &invalid, 1)?,
-                    },
-                    Mode::Every(interval) => {
-                        if batch.len + line.len() + 1 > entry::MAX_BODY {
-                            post.batch(&mut batch, defaults)?;
-                        }
-                        batch.push(n, line, interval);
-                    }
+                Some(Input::Bad(n, invalid)) => post.skip(&format!("line {n}"), &invalid)?,
+                Some(Input::Line(n, line)) => match Draft::from_json(&line, defaults) {
+                    Ok(draft) => post.one(draft, &format!("line {n}"))?,
+                    Err(invalid) => post.skip(&format!("line {n}"), &invalid)?,
                 },
             },
         }
     }
-    post.batch(&mut batch, defaults)?;
     match post.rejected {
         0 => Ok(()),
         lines => Err(Rejected { lines }.into()),
-    }
-}
-
-async fn sleep_until(deadline: Option<Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline).await,
-        None => std::future::pending().await,
-    }
-}
-
-/// Lines that wait for the end of the interval.
-#[derive(Debug, Default)]
-struct Batch {
-    lines: Vec<String>,
-    first: usize,
-    last: usize,
-    len: usize,
-    deadline: Option<Instant>,
-}
-
-impl Batch {
-    fn push(&mut self, n: usize, line: String, interval: Duration) {
-        if self.lines.is_empty() {
-            self.first = n;
-            self.deadline = Some(Instant::now() + interval);
-        }
-        self.last = n;
-        self.len += line.len() + 1;
-        self.lines.push(line);
     }
 }
 
@@ -148,7 +86,7 @@ struct Poster<'a, O, E> {
 
 impl<O: Write, E: Write> Poster<'_, O, E> {
     /// Append one draft. An invalid draft is skipped. Other errors stop.
-    fn one(&mut self, draft: Draft, label: &str, lines: usize) -> Result<()> {
+    fn one(&mut self, draft: Draft, label: &str) -> Result<()> {
         match self.store.append(draft) {
             Ok(entry) => {
                 writeln!(self.out, "{}", entry.id)?;
@@ -156,42 +94,25 @@ impl<O: Write, E: Write> Poster<'_, O, E> {
                 Ok(())
             }
             Err(e) => match e.downcast_ref::<Invalid>() {
-                Some(invalid) => self.skip(label, invalid, lines),
+                Some(invalid) => self.skip(label, invalid),
                 None => Err(e),
             },
         }
     }
 
-    fn skip(&mut self, label: &str, invalid: &Invalid, lines: usize) -> Result<()> {
+    fn skip(&mut self, label: &str, invalid: &Invalid) -> Result<()> {
         writeln!(self.err, "skipped {label}: {invalid}")?;
-        self.rejected += lines;
+        self.rejected += 1;
         Ok(())
-    }
-
-    /// Post the waiting lines as one entry, if there are any.
-    fn batch(&mut self, batch: &mut Batch, defaults: &Draft) -> Result<()> {
-        let batch = std::mem::take(batch);
-        if batch.lines.is_empty() {
-            return Ok(());
-        }
-        let label = match batch.first == batch.last {
-            true => format!("line {}", batch.first),
-            false => format!("lines {}-{}", batch.first, batch.last),
-        };
-        let draft = Draft {
-            body: batch.lines.join("\n"),
-            ..defaults.clone()
-        };
-        self.one(draft, &label, batch.lines.len())
     }
 }
 
-/// Read lines on a blocking thread. A line is at most [`entry::MAX_BODY`]
-/// bytes, so a line with no end cannot use all the memory. Blank lines are
-/// skipped.
+/// Read lines on a blocking thread. A line is at most [`entry::MAX_ENTRY`]
+/// bytes, the limit of one entry as JSON, so a line with no end cannot use
+/// all the memory. Blank lines are skipped.
 fn read_lines(input: impl Read, tx: mpsc::Sender<Input>) {
     let mut reader = BufReader::new(input);
-    let limit = entry::MAX_BODY as u64 + 2; // the line, "\r" and "\n"
+    let limit = entry::MAX_ENTRY as u64 + 2; // the line, "\r" and "\n"
     let mut n = 0;
     loop {
         n += 1;
@@ -211,7 +132,7 @@ fn read_lines(input: impl Read, tx: mpsc::Sender<Input>) {
                     Invalid::TooLong {
                         field: "line",
                         len: buf.len(),
-                        max: entry::MAX_BODY,
+                        max: entry::MAX_ENTRY,
                     },
                 )
             }

@@ -158,7 +158,7 @@ impl Drop for Serve {
     }
 }
 
-/// Read stderr up to the first `yappr follow <ticket>` line, for at most 30
+/// Read stderr up to the first `yappr read <ticket>` line, for at most 30
 /// seconds. A thread reads all of stderr, so the server never blocks on a full
 /// pipe.
 fn read_ticket(stderr: ChildStderr) -> String {
@@ -188,7 +188,7 @@ fn read_ticket(stderr: ChildStderr) -> String {
             }
         };
         seen.push_str(&line);
-        if let Some(ticket) = line.trim().strip_prefix("yappr follow ") {
+        if let Some(ticket) = line.trim().strip_prefix("yappr read ") {
             let ticket = ticket.to_string();
             EndpointTicket::from_str(&ticket).expect("valid ticket");
             return ticket;
@@ -231,12 +231,21 @@ fn post_reads_the_body_from_stdin() {
         .unwrap();
     assert_eq!(out.trim(), "1");
     let serve = Serve::start(&writer);
-    let out = follower.run(["follow", &serve.ticket, "--no-follow", "--output", "json"]);
+    let out = follower.run(["read", &serve.ticket, "--output", "json"]);
     let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(v["source"], "disk");
     assert_eq!(v["title"], "disk usage");
     assert_eq!(v["kind"], "info");
     assert_eq!(v["body"], "Filesystem Size\n/dev/sda1 100G\n");
+}
+
+#[test]
+fn follow_with_no_follow_still_stops_after_the_replay() {
+    let (writer, follower) = pair();
+    writer.post("one\n", &[]);
+    let serve = Serve::start(&writer);
+    let out = follower.run(["follow", &serve.ticket, "--no-follow", "--output", "raw"]);
+    assert_eq!(out, "one\n");
 }
 
 #[test]
@@ -315,7 +324,7 @@ fn follow_catches_up_then_resumes_from_the_cursor() {
     writer.post("one", &[]);
     writer.post("two", &[]);
     let serve = Serve::start(&writer);
-    let follow = ["follow", &serve.ticket, "--no-follow", "--output", "json"];
+    let follow = ["read", &serve.ticket, "--output", "json"];
 
     assert_eq!(json_ids(&follower.run(follow)), vec![1, 2]);
     assert_eq!(json_ids(&follower.run(follow)), Vec::<u64>::new());
@@ -335,9 +344,9 @@ fn since_and_tail_do_not_move_the_cursor() {
     }
     let serve = Serve::start(&writer);
     let t = serve.ticket.as_str();
-    let json = ["--no-follow", "--output", "json"];
+    let json = ["--output", "json"];
     let run = |extra: &[&str]| {
-        let mut args = vec!["follow", t];
+        let mut args = vec!["read", t];
         args.extend_from_slice(&json);
         args.extend_from_slice(extra);
         json_ids(&follower.run(args))
@@ -356,7 +365,7 @@ fn source_and_kind_filters() {
     writer.post("b", &["--source", "cpu", "--kind", "warn"]);
     writer.post("c", &["--source", "disk-2", "--kind", "alert"]);
     let serve = Serve::start(&writer);
-    let base = ["follow", &serve.ticket, "--no-follow", "--output", "json"];
+    let base = ["read", &serve.ticket, "--output", "json"];
     let mut by_source = base.to_vec();
     by_source.extend(["--source", "^disk", "--cursor", "s"]);
     assert_eq!(json_ids(&follower.run(by_source)), vec![1, 3]);
@@ -377,7 +386,7 @@ fn json_output_passes_unknown_fields_through() {
     text.push('\n');
     std::fs::write(&log, text).unwrap();
     let serve = Serve::start(&writer);
-    let out = follower.run(["follow", &serve.ticket, "--no-follow", "--output", "json"]);
+    let out = follower.run(["read", &serve.ticket, "--output", "json"]);
     let lines: Vec<serde_json::Value> = out
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
@@ -396,7 +405,7 @@ fn raw_output_prints_bodies_only() {
     writer.post("first", &["--title", "t"]);
     writer.post("second\n", &[]);
     let serve = Serve::start(&writer);
-    let out = follower.run(["follow", &serve.ticket, "--no-follow", "--output", "raw"]);
+    let out = follower.run(["read", &serve.ticket, "--output", "raw"]);
     assert_eq!(out, "first\nsecond\n");
 }
 
@@ -406,27 +415,11 @@ fn text_output_uses_color_only_when_asked() {
     writer.post("body", &["--kind", "alert", "--title", "disk full"]);
     let serve = Serve::start(&writer);
     let t = serve.ticket.as_str();
-    let plain = follower.run([
-        "follow",
-        t,
-        "--no-follow",
-        "--output",
-        "text",
-        "--cursor",
-        "a",
-    ]);
+    let plain = follower.run(["read", t, "--output", "text", "--cursor", "a"]);
     assert!(!plain.contains('\x1b'), "{plain:?}");
     assert!(plain.contains("alert disk full"), "{plain:?}");
     let color = follower.run([
-        "follow",
-        t,
-        "--no-follow",
-        "--output",
-        "text",
-        "--color",
-        "always",
-        "--cursor",
-        "b",
+        "read", t, "--output", "text", "--color", "always", "--cursor", "b",
     ]);
     assert!(color.contains("\x1b[1;31malert\x1b[0m"), "{color:?}");
 }
@@ -437,7 +430,7 @@ fn a_pipe_gets_json_lines_by_default() {
     writer.post("first", &[]);
     writer.post("second", &["--title", "t"]);
     let serve = Serve::start(&writer);
-    let out = follower.run(["follow", &serve.ticket, "--no-follow"]);
+    let out = follower.run(["read", &serve.ticket]);
     let bodies: Vec<String> = out
         .lines()
         .map(|l| {
@@ -459,13 +452,7 @@ fn not_kind_hides_a_kind_and_moves_the_cursor_past_it() {
     writer.post("started", &[]);
     let serve = Serve::start(&writer);
     let kinds = |args: &[&str]| -> Vec<String> {
-        let mut full = vec![
-            "follow",
-            serve.ticket.as_str(),
-            "--no-follow",
-            "--output",
-            "json",
-        ];
+        let mut full = vec!["read", serve.ticket.as_str(), "--output", "json"];
         full.extend_from_slice(args);
         follower
             .run(full)
@@ -529,7 +516,7 @@ fn init_serves_pairs_one_device_and_keeps_serving() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     writer.post("hello", &[]);
-    let got = device.run(["follow", "writer", "--no-follow", "--output", "json"]);
+    let got = device.run(["read", "writer", "--output", "json"]);
     assert!(got.contains("\"body\":\"hello\""), "{got}");
     init.kill().ok();
     init.wait().ok();
@@ -554,14 +541,14 @@ fn disallowed_follower_gets_nothing() {
     let stranger = Machine::new();
     writer.post("secret", &[]);
     let serve = Serve::start(&writer);
-    let (stdout, stderr) = stranger.fail(["follow", &serve.ticket, "--no-follow"]);
+    let (stdout, stderr) = stranger.fail(["read", &serve.ticket]);
     assert_eq!(stdout, "");
     assert!(
         stderr.contains(&format!("yappr allow {}", stranger.id())),
         "{stderr}"
     );
     // a denied follower does not retry forever in follow mode either
-    let (stdout, _) = stranger.fail(["follow", &serve.ticket]);
+    let (stdout, _) = stranger.fail(["read", "-f", &serve.ticket]);
     assert_eq!(stdout, "");
 }
 
@@ -570,7 +557,7 @@ fn live_follow_prints_new_entries() {
     let (writer, follower) = pair();
     let serve = Serve::start(&writer);
     let mut child = follower
-        .command(&["follow", &serve.ticket, "--output", "json"])
+        .command(&["read", "-f", &serve.ticket, "--output", "json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -589,8 +576,7 @@ fn writer_restart_keeps_the_ticket_and_the_feed() {
     let (writer, follower) = pair();
     writer.post("before", &[]);
     let first = Serve::start(&writer);
-    let follow =
-        |t: &str| json_ids(&follower.run(["follow", t, "--no-follow", "--output", "json"]));
+    let follow = |t: &str| json_ids(&follower.run(["read", t, "--output", "json"]));
     assert_eq!(follow(&first.ticket), vec![1]);
     drop(first);
     writer.post("after", &[]);
@@ -638,7 +624,7 @@ fn store_files_are_private() {
 #[test]
 fn exit_2_on_a_usage_error() {
     let m = Machine::new();
-    assert_eq!(m.exit(["follow"], b"").0, 2);
+    assert_eq!(m.exit(["read"], b"").0, 2);
     assert_eq!(m.exit(["post", "--no-such-option"], b"").0, 2);
 }
 
@@ -648,10 +634,10 @@ fn exit_3_when_the_writer_denies_the_follower() {
     let stranger = Machine::new();
     writer.post("secret", &[]);
     let serve = Serve::start(&writer);
-    let (code, stdout, _) = stranger.exit(["follow", &serve.ticket, "--no-follow"], b"");
+    let (code, stdout, _) = stranger.exit(["read", &serve.ticket], b"");
     assert_eq!((code, stdout.as_str()), (3, ""));
     // follow mode does not retry a denial
-    assert_eq!(stranger.exit(["follow", &serve.ticket], b"").0, 3);
+    assert_eq!(stranger.exit(["read", "-f", &serve.ticket], b"").0, 3);
 }
 
 #[test]
@@ -675,7 +661,7 @@ fn exit_4_when_follow_gets_an_invalid_entry() {
     let line = r#"{"v":1,"id":1,"time":"2026-10-27T09:30:00Z","source":"s","kind":"info","body":"\u001b[2J"}"#;
     std::fs::write(writer.dir.path().join("feed.ndjson"), format!("{line}\n")).unwrap();
     let serve = Serve::start(&writer);
-    let (code, stdout, stderr) = follower.exit(["follow", &serve.ticket, "--no-follow"], b"");
+    let (code, stdout, stderr) = follower.exit(["read", &serve.ticket], b"");
     assert_eq!(code, 4, "{stderr}");
     assert_eq!(stdout, "");
 }
@@ -685,7 +671,7 @@ fn exit_5_when_the_writer_is_not_reachable() {
     let (writer, follower) = pair();
     // a ticket with no address, and no serve process
     let ticket = writer.run(["ticket"]);
-    let (code, stdout, stderr) = follower.exit(["follow", ticket.trim(), "--no-follow"], b"");
+    let (code, stdout, stderr) = follower.exit(["read", ticket.trim()], b"");
     assert_eq!(code, 5, "{stderr}");
     assert_eq!(stdout, "");
 }
@@ -703,7 +689,7 @@ fn status_goes_to_stderr_only() {
     // follow mode retries an unreachable writer, and says so on stderr
     let ticket = writer.run(["ticket"]);
     let mut child = follower
-        .command(&["follow", ticket.trim()])
+        .command(&["read", "-f", ticket.trim()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -732,7 +718,7 @@ fn exit_0_when_the_reader_of_stdout_stops() {
     }
     let serve = Serve::start(&writer);
     let mut child = follower
-        .command(&["follow", &serve.ticket, "--output", "raw"])
+        .command(&["read", "-f", &serve.ticket, "--output", "raw"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -776,7 +762,7 @@ fn a_restart_on_a_fixed_port_keeps_the_ticket_valid() {
     let ticket = first.ticket.clone();
 
     let mut child = follower
-        .command(&["follow", &ticket, "--output", "json"])
+        .command(&["read", "-f", &ticket, "--output", "json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -850,7 +836,7 @@ fn post_json_relays_another_feed() {
     writer.post("one", &["--source", "a"]);
     writer.post("two", &["--source", "b", "--kind", "warn"]);
     let serve = Serve::start(&writer);
-    let json = follower.run(["follow", &serve.ticket, "--no-follow", "--output", "json"]);
+    let json = follower.run(["read", &serve.ticket, "--output", "json"]);
 
     let copy = Machine::new();
     let (code, stdout, stderr) = copy.exit(["post", "--json"], json.as_bytes());
@@ -1032,14 +1018,7 @@ fn multiple_writers_keep_separate_cursors_and_tag_json() {
     let sb = Serve::start(&b);
     device.run(["alias", "set", "laptop", &sa.ticket]);
     device.run(["alias", "set", "server", &sb.ticket]);
-    let output = device.run([
-        "follow",
-        "laptop",
-        "server",
-        "--output",
-        "json",
-        "--no-follow",
-    ]);
+    let output = device.run(["read", "laptop", "server", "--output", "json"]);
     let entries: Vec<serde_json::Value> = output
         .lines()
         .map(|s| serde_json::from_str(s).unwrap())
@@ -1052,17 +1031,10 @@ fn multiple_writers_keep_separate_cursors_and_tag_json() {
         .iter()
         .any(|e| e["writer"] == "server" && e["entry"]["body"] == "server first"));
     a.post("laptop second", &[]);
-    let output = device.run([
-        "follow",
-        "laptop",
-        "server",
-        "--output",
-        "json",
-        "--no-follow",
-    ]);
+    let output = device.run(["read", "laptop", "server", "--output", "json"]);
     assert_eq!(output.lines().count(), 1);
     assert!(output.contains("laptop second"));
-    let (_, error) = device.fail(["follow", "laptop", &sa.ticket, "--no-follow"]);
+    let (_, error) = device.fail(["read", "laptop", &sa.ticket]);
     assert!(error.contains("more than once"));
 }
 #[test]
@@ -1131,17 +1103,7 @@ fn one_denied_writer_does_not_discard_another_writers_entries() {
     let b = Serve::start(&denied);
     device.run(["alias", "set", "good", &a.ticket]);
     device.run(["alias", "set", "denied", &b.ticket]);
-    let (exit, output, _) = device.exit(
-        [
-            "follow",
-            "denied",
-            "good",
-            "--no-follow",
-            "--output",
-            "json",
-        ],
-        b"",
-    );
+    let (exit, output, _) = device.exit(["read", "denied", "good", "--output", "json"], b"");
     assert_eq!(exit, 3);
     assert_eq!(output.lines().count(), 1);
     assert_eq!(

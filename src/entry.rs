@@ -114,7 +114,7 @@ impl std::error::Error for Invalid {}
 
 impl Draft {
     /// A draft from one JSON line, for example a line of
-    /// `follow --output json`. A field that the line does not have comes from
+    /// `read --output json`. A field that the line does not have comes from
     /// `defaults`. The writer sets `v`, `id` and `time`, so the line's values
     /// for these fields are dropped. Other fields go to `extra`.
     pub fn from_json(line: &str, defaults: &Draft) -> Result<Draft, Invalid> {
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn json_draft_drops_writer_fields_and_keeps_the_others() {
-        // a line from "follow --output json" of another feed
+        // a line from "read --output json" of another feed
         let line = r#"{"v":1,"id":7,"time":"2026-10-27T09:30:00Z","source":"s","kind":"info","body":"b","host":"nas"}"#;
         let d = Draft::from_json(line, &defaults()).unwrap();
         assert_eq!(d.extra.len(), 1, "{:?}", d.extra);

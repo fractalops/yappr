@@ -1,5 +1,7 @@
 # Yappr
 
+**Give your scripts a way to reach you—and get an answer.**
+
 Yappr brings updates, questions, and approval requests from your machines to
 your other devices. A script can wait for your reply before it continues. Each
 machine keeps its feed, so devices that were offline catch up when they
@@ -23,7 +25,8 @@ cargo install --git https://github.com/fractalops/yappr
 
 ## Quick start
 
-In this example, `server` writes the feed and `laptop` reads it.
+Here, `server` posts updates and asks questions. `laptop` reads them and sends
+your answers.
 
 On the server, start the feed and pair your first device:
 
@@ -31,31 +34,34 @@ On the server, start the feed and pair your first device:
 yappr init
 ```
 
-The server shows a QR code and a pairing code that starts with `YAPPR:`. On a
-phone, scan the QR code with the browser app at [yappr.run](https://yappr.run).
-On the laptop, join with the pairing code:
+The server shows a QR code and a pairing code that starts with `YAPPR:`.
+On a phone, open [yappr.run](https://yappr.run) and scan the QR code.
+On the laptop, print its device ID, then join with the server's pairing code:
 
 ```sh
+yappr id
 yappr join YAPPR:... --name laptop --alias server
 ```
 
-The server shows the name and the ID of the new device. Check that the ID
-matches the ID on the device, then enter `y`. The server saves an alias from
-the device name, for example `laptop`, and keeps serving. Next time, start the
-server with `yappr serve`. To pair more devices, run `yappr pair` in a second
-terminal.
+Replace `YAPPR:...` with the code from the server.
+Check that the device ID on the server matches the ID on the joining device.
+Enter `y` on the server to grant access.
+The server saves the device name as an alias, such as `laptop`, and keeps serving.
 
-On the laptop, follow the feed:
+On the laptop, read the feed and wait for new entries:
 
 ```sh
-yappr follow server
+yappr read server -f
 ```
 
-On the server, post an entry. It appears on the laptop:
+In a second terminal on the server, post an entry. It appears on the laptop:
 
 ```sh
 echo "Backup complete" | yappr post --source backup
 ```
+
+Next time, use `yappr serve` to start the server.
+To pair another device while it runs, use `yappr pair` in a second terminal.
 
 ## Examples
 
@@ -63,11 +69,11 @@ echo "Backup complete" | yappr post --source backup
 
 ```sh
 df -h / | yappr post --source disk --title "Disk usage"
-uptime | yappr post --source server --kind warn --title "Load is high"
+uptime | yappr post --source server --title "Uptime"
 ```
 
-`post` reads all of stdin and adds it as one entry. The feed keeps every
-entry, so post events, not a live log stream.
+`post` reads stdin until it ends, then saves the output as one entry.
+Use it for a command's output or an individual event.
 
 ### Ask before a deploy
 
@@ -78,63 +84,70 @@ then
 fi
 ```
 
-Approval exits with 0. Rejection exits with 7. Timeout and cancellation have
-their own exit codes. Yappr does not do the action. Your script does.
+`approve` exits with 0 for approval, 7 for rejection, 6 for expiry, or 8 for
+cancellation. The script runs `deploy` after approval.
 
-### Let a script choose the next step
+### Choose what a script does next
 
 ```sh
-case $(yappr ask laptop "Disk is full. What next?" --choice clean --choice stop) in
+choice=$(yappr ask laptop "Disk is full. What next?" \
+  --choice clean --choice stop) || exit $?
+
+case "$choice" in
   clean) ./cleanup ;;
   stop)  exit 1 ;;
 esac
 ```
 
-`ask` prints the value of the selected choice.
+`ask` prints the selected value, such as `clean`.
+The script stops on expiry, cancellation, or error.
 
 ### Answer a question
 
-On the laptop, find the question ID in the JSON output:
+In the browser app, select a choice on the question.
+On the laptop, use the CLI to find the question ID:
 
 ```sh
-yappr follow server --no-follow --output json \
+yappr read server --since 0 --output json \
   | jq -r 'select(.kind == "question") | "\(.choices.question.id)  \(.title)"'
 ```
 
-Then answer it:
+Replace `QUESTION_ID` with an ID from the output. For an approval, answer with:
 
 ```sh
-yappr answer server <QUESTION_ID> --choice approve
+yappr answer server QUESTION_ID --choice approve
 ```
 
-If the server is not reachable, the answer waits in a local outbox.
-`yappr retry` sends it again.
+Yappr saves your answer locally before sending it.
+If the server is offline, run `yappr retry` when it is reachable again.
 
-### Follow several machines
+### Read several machines
 
 ```sh
-yappr follow server nas
-yappr follow server nas --output json
+yappr read server nas
+yappr read server nas -f --output json
 ```
 
-`follow` prints the entries that it missed, then waits for new entries. After
-a connection failure or sleep, it continues from where it stopped.
+Each machine has its own saved position. `read` prints the entries that you
+have not read yet. With `-f`, it then waits for new ones, and it resumes after
+sleep or a connection failure.
 
-## Devices and access
+## Manage devices
 
 ```sh
-yappr status           # this machine, its peers, and open questions
+yappr status           # this machine, its devices, questions, and queued answers
 yappr allow laptop
 yappr deny laptop
 yappr health server    # connection state, path, and round-trip time
 ```
 
-A ticket is an address, not a secret. The writer denies unknown devices by
-default. Read access does not let a device answer a question. Each question
-names the one device that can answer it. When you deny a device, a running
-`serve` closes its feed within five seconds.
+Only devices you allow can read the feed. A feed ticket carries connection
+information. You grant read access through pairing or `yappr allow`.
+Each question names the one device that can answer it.
+`yappr deny` revokes read access. A running `serve` closes the device's feed
+connections within five seconds.
 
-## More
+## Reference
 
 The [scripting reference](docs/scripting.md) describes the entry format, exit
 codes, questions, pairing, several writers, relays, and storage.

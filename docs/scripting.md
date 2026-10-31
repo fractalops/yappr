@@ -3,27 +3,27 @@
 Yappr appends entries and checks question decisions. It never executes the action described in an entry.
 These rules define the scripting interface.
 
-**stdout carries data only.** `post` prints the new entry id. `follow` prints
+**stdout carries data only.** `post` prints the new entry id. `read` prints
 entries. `id` and `ticket` print their values. All status messages,
 warnings and errors go to stderr.
 
 **Text is for people. JSON is for programs.** When stdout is a terminal,
-`follow`, `questions` and `health` print text. When stdout is a pipe or a file,
+`read`, `questions` and `health` print text. When stdout is a pipe or a file,
 they print one JSON object per line. The text layout can change between
 versions. Do not parse it. In a script, write `--output json` so that the
 format does not depend on where the output goes.
 
 | Command | Terminal | Pipe or file |
 |---|---|---|
-| `follow` | text, one line for each one-line entry | JSON, one entry per line |
+| `read` | text, one line for each one-line entry | JSON, one entry per line |
 | `questions`, `health` | text | JSON, one object per line |
 | `status` | text | one JSON object |
 | `post`, `ask`, `answer`, `id`, `ticket` | one value | the same value |
 
-`--output text`, `--output json` and, for `follow`, `--output raw` select a
+`--output text`, `--output json` and, for `read`, `--output raw` select a
 format for any destination. `--output raw` prints the bodies only.
 
-**`follow --output json` prints one entry per line** (NDJSON), with no color
+**`read --output json` prints one entry per line** (NDJSON), with no color
 and no other lines. Each entry has the format below. The feed file on the
 writer has the same format.
 
@@ -49,14 +49,14 @@ the producer.
 
 **Versions.** A new optional field does not change `v`. A change that removes
 a field, or changes the meaning of a field, increments `v`. Ignore the fields
-that you do not know. `follow` keeps them in its JSON output, and it stops at
+that you do not know. `read` keeps them in its JSON output, and it stops at
 an entry with a `v` that it does not know.
 
 **Input for `post --json`.** Each line is one JSON object. `post` uses the
 fields `source`, `kind`, `title` and `body`. A field that a line does not have
 comes from the options (`--source`, `--kind`, `--title`). The writer sets `v`,
 `id` and `time`, so `post` ignores these fields in the input. `post` keeps all
-other fields in the entry. Thus the output of `follow --output json` is valid
+other fields in the entry. Thus the output of `read --output json` is valid
 input. With several writers, that output wraps each entry as
 `{"writer": ..., "entry": {...}}`. `post --json` takes the entry from such a
 line. An entry is at most 768 KiB as a JSON line.
@@ -69,17 +69,17 @@ exits with code 4.
 
 | code | meaning                                                         |
 |------|-----------------------------------------------------------------|
-| 0    | success. `follow` also gives 0 on Ctrl-C, or when the reader of its output stops (`\| head`) |
+| 0    | success. `read` also gives 0 on Ctrl-C, or when the reader of its output stops (`\| head`) |
 | 1    | any other error                                                 |
 | 2    | usage error                                                     |
-| 3    | the writer does not allow this follower                         |
-| 4    | an entry is not valid (input to `post`, or an entry that `follow` received) |
-| 5    | the follower cannot reach the writer. `follow` tries again, so only `--no-follow` gives 5 |
+| 3    | the writer does not allow this device                           |
+| 4    | an entry is not valid (input to `post`, or an entry that `read` received) |
+| 5    | the device cannot reach the writer. `read -f` tries again, so only `read` without `-f` gives 5 |
 
 For example, a cron job can treat code 5 as "try later":
 
 ```
-yappr follow <ticket> --no-follow --output json >> alerts.ndjson || [ $? -eq 5 ]
+yappr read <ticket> --output json >> alerts.ndjson || [ $? -eq 5 ]
 ```
 
 ## Questions and choices
@@ -163,7 +163,7 @@ The device that claimed an invitation can read the answer for two minutes after 
 
 ## Several writers
 
-`yappr follow laptop server` follows both local aliases through one endpoint.
+`yappr read laptop server` reads both local aliases through one endpoint.
 Each writer resumes from its own cursor.
 One failed writer does not stop another writer's task.
 Multiple writers add a `writer` and `entry` envelope to JSON output.
@@ -178,10 +178,10 @@ The probe leaves all cursors unchanged.
 
 Several feeds print entries as they arrive. They do not guarantee a shared time order.
 
-## Following
+## Reading
 
 `post` works without a running `serve` command. Entries wait in the local feed.
-`follow` saves its position after each entry and resumes there after a failure.
+`read` saves its position after each entry and resumes there after a failure.
 `--since ID|DURATION|TIME` and `--tail N` do not change the saved position.
 Use `--cursor NAME` for an independent position, for example one for a script.
 Use `--source REGEX`, `--kind KIND` and `--not-kind KIND` to filter output. `--output raw` prints bodies only.
@@ -213,7 +213,7 @@ yappr network show
 yappr network set --relay https://relay.example.com
 yappr network set --no-relay
 yappr network set --defaults
-yappr --relay https://relay.example.com follow laptop
+yappr --relay https://relay.example.com read laptop
 ```
 
 `network set` saves the settings for the selected feed directory.

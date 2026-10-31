@@ -12,7 +12,7 @@ use crate::entry::is_plain_file_name;
 /// The last entry id that a follower printed, for one feed and one name.
 ///
 /// Different names give independent cursors, so a person in a terminal and a
-/// script can follow the same feed without taking entries from each other.
+/// script can read the same feed without taking entries from each other.
 #[derive(Debug, Clone)]
 pub struct Cursor {
     path: PathBuf,

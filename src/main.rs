@@ -32,9 +32,9 @@ const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Private feeds, questions, and choices between your devices.
 ///
-/// One machine writes entries. Your other devices follow it over iroh. There
-/// is no account or hosted feed service. When a follower
-/// connects, it receives the entries that it missed, and then the new entries.
+/// One machine writes entries. Your other devices read them over iroh. There
+/// is no account or hosted feed service. A device that reads the feed gets
+/// the entries that it missed, and with --follow, the new entries.
 ///
 /// The identity of this machine is in <feed dir>/secret.key. Set IROH_SECRET to
 /// use a different secret key.
@@ -88,7 +88,7 @@ enum Commands {
     /// have to run.
     #[clap(after_help = "Examples:
   df -h / | yappr post --source disk --title \"Disk usage\"
-  yappr follow laptop --output json | jq -c 'select(.kind == \"alert\")' | yappr post --json")]
+  yappr read laptop -f --output json | jq -c 'select(.kind == \"alert\")' | yappr post --json")]
     Post(PostArgs),
 
     /// Serve the feed, pair one device, and keep serving.
@@ -100,30 +100,35 @@ enum Commands {
   yappr init --name \"Work laptop\"")]
     Init(InitArgs),
 
-    /// Serve the local feed to the allowed followers.
+    /// Serve the local feed to the allowed devices.
     ///
     /// Prints the ticket on stderr.
     Serve(ServeArgs),
 
-    /// Print the entries of a feed, then wait for new entries.
+    /// Print the new entries of a feed. With --follow, wait for more.
     ///
-    /// Without --since or --tail, the follower starts after the last entry
-    /// that it printed before, and it saves its position after each entry.
+    /// Without --since or --tail, read starts after the last entry that it
+    /// printed before, and it saves its position after each entry.
     #[clap(after_help = "Examples:
-  yappr follow laptop
-  yappr follow laptop server --output json
-  yappr follow laptop --since 2h --no-follow")]
-    Follow(FollowArgs),
+  yappr read laptop
+  yappr read laptop -f
+  yappr read laptop server --output json
+  yappr read laptop --since 2h")]
+    Read(ReadArgs),
 
-    /// Let a follower read this feed.
+    /// The same as "read --follow".
+    #[clap(hide = true)]
+    Follow(ReadArgs),
+
+    /// Let a device read this feed.
     Allow {
-        /// The alias or endpoint ID of the follower.
+        /// The alias or endpoint ID of the device.
         id: String,
     },
 
-    /// Stop a follower from reading this feed.
+    /// Stop a device from reading this feed.
     Deny {
-        /// The alias or endpoint ID of the follower.
+        /// The alias or endpoint ID of the device.
         id: String,
     },
 
@@ -392,7 +397,7 @@ struct PostArgs {
     #[clap(long)]
     body: Option<String>,
 
-    /// Post each line of stdin as one entry in JSON, the format of "follow
+    /// Post each line of stdin as one entry in JSON, the format of "read
     /// --output json". A field that a line does not have comes from the
     /// options.
     #[clap(long, conflicts_with = "body")]
@@ -410,7 +415,7 @@ fn parse_interval(s: &str) -> Result<Duration, String> {
 }
 
 #[derive(clap::Args, Debug)]
-struct FollowArgs {
+struct ReadArgs {
     /// Writer aliases, endpoint IDs, or feed tickets.
     #[clap(num_args = 1.., required = true, value_name = "WRITER")]
     ticket: Vec<String>,
@@ -446,8 +451,12 @@ struct FollowArgs {
     #[clap(long, value_enum, default_value_t)]
     color: ColorChoice,
 
-    /// Stop after the last entry. Do not wait for new entries.
-    #[clap(long)]
+    /// After the last entry, wait for new entries.
+    #[clap(short, long)]
+    follow: bool,
+
+    /// Stop after the last entry. This is the default of read.
+    #[clap(long, hide = true, overrides_with = "follow")]
     no_follow: bool,
 
     /// The name of the saved position. Different names have independent
@@ -636,7 +645,7 @@ async fn serve(common: &CommonArgs, args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
-/// Start the server, save its ticket, and print how to follow it. With
+/// Start the server, save its ticket, and print how to read it. With
 /// `pair_hint`, a feed that no device can read gets a hint to run pair.
 async fn start_serving(
     common: &CommonArgs,
@@ -663,20 +672,20 @@ async fn start_serving(
     let ticket = EndpointTicket::new(addr);
     let allowed = store.allow_list().load()?.len();
 
-    // Status goes to stderr. The tests read the first "yappr follow" line.
+    // Status goes to stderr. The tests read the first "yappr read" line.
     eprintln!(
-        "Serving {} ({} entries, {allowed} allowed followers).",
+        "Serving {} ({} entries, {allowed} allowed devices).",
         store.dir().display(),
         store.last_id()?
     );
     if allowed == 0 && pair_hint {
         eprintln!(
-            "No follower can read this feed yet. To pair a device, run \"yappr pair\" \
+            "No device can read this feed yet. To pair a device, run \"yappr pair\" \
              in another terminal."
         );
     }
-    eprintln!("To follow, use:\nyappr follow {ticket}");
-    eprintln!("or, with the endpoint id only:\nyappr follow {short}");
+    eprintln!("To read the feed on another computer, use:\nyappr read {ticket}");
+    eprintln!("or, with the endpoint id only:\nyappr read {short}");
     Ok((store, server, ticket))
 }
 
@@ -760,7 +769,7 @@ impl Printer {
     }
 }
 
-async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
+async fn read(common: &CommonArgs, args: ReadArgs) -> Result<()> {
     let dir = common.dir()?;
     let mut targets = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -792,7 +801,7 @@ async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
     for (label, addr) in targets {
         let mut req = Request {
-            follow: !args.no_follow,
+            follow: args.follow && !args.no_follow,
             tail: args.tail,
             kinds: args.kind.clone(),
             not_kinds: args.not_kind.clone(),
@@ -821,7 +830,7 @@ async fn follow(common: &CommonArgs, args: FollowArgs) -> Result<()> {
             writer: multiple.then(|| label.clone()),
             renderer: renderer.clone(),
         };
-        let status = !args.no_follow && io::stderr().is_terminal();
+        let status = args.follow && !args.no_follow && io::stderr().is_terminal();
         let mut follower = Follower::new(endpoint.clone(), addr, req);
         tasks.spawn(async move {
             let mut caught_up = false;
@@ -1509,9 +1518,19 @@ async fn run(args: Args) -> Result<()> {
         Commands::Post(args) => post(common, args).await,
         Commands::Serve(args) => serve(common, args).await,
         Commands::Init(args) => init(common, args).await,
-        Commands::Follow(args) => {
+        Commands::Read(args) => {
             tokio::select! {
-                res = follow(common, args) => res,
+                res = read(common, args) => res,
+                _ = tokio::signal::ctrl_c() => Ok(()),
+            }
+        }
+        Commands::Follow(args) => {
+            let args = ReadArgs {
+                follow: true,
+                ..args
+            };
+            tokio::select! {
+                res = read(common, args) => res,
                 _ = tokio::signal::ctrl_c() => Ok(()),
             }
         }
@@ -1607,7 +1626,7 @@ async fn run(args: Args) -> Result<()> {
 /// The exit code for an error. docs/scripting.md documents these codes.
 fn exit_code(err: &anyhow::Error) -> i32 {
     if is_broken_pipe(err) {
-        // the reader of stdout left, for example "yappr follow ... | head"
+        // the reader of stdout left, for example "yappr read ... | head"
         0
     } else if let Some(outcome) = err.downcast_ref::<QuestionOutcome>() {
         outcome.code

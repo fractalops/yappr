@@ -107,7 +107,7 @@ impl<O: Write, E: Write> Poster<'_, O, E> {
     }
 }
 
-/// The entry of a line from `follow --output json` with several writers. That
+/// The entry of a line from `read --output json` with several writers. That
 /// output wraps each entry as `{"writer": ..., "entry": {...}}`. Other lines
 /// stay as they are.
 fn unwrap_writer(line: &str) -> std::borrow::Cow<'_, str> {

@@ -154,7 +154,7 @@ async fn writer_error_does_not_send_terminal_controls_to_stderr() {
     let path = dir.path().to_owned();
     let output = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_yappr"))
-            .args(["follow", &ticket, "--no-follow"])
+            .args(["read", &ticket])
             .env("YAPPR_DIR", path)
             .env("YAPPR_NETWORK", "local")
             .env_remove("IROH_SECRET")

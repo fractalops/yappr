@@ -1,4 +1,4 @@
-//! The follow side: subscribe to a feed.
+//! The reading side: subscribe to a feed.
 use std::{fmt, time::Duration};
 
 use anyhow::{bail, Context, Result};

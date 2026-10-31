@@ -13,6 +13,20 @@ use crate::{disk, store::Store};
 
 pub const ALPN: &[u8] = b"pair/0";
 
+/// How long after the deadline the device that claimed an invitation can read
+/// its result. New claims and confirmations still end at the deadline.
+pub const RESULT_WINDOW: jiff::SignedDuration = jiff::SignedDuration::from_secs(120);
+
+/// The end of the result window of `offer`.
+#[cfg(not(wasm_browser))]
+fn result_until(offer: &Offer) -> Timestamp {
+    offer
+        .invitation
+        .expires_at
+        .checked_add(RESULT_WINDOW)
+        .unwrap_or(offer.invitation.expires_at)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invitation {
     pub ticket: String,
@@ -95,7 +109,7 @@ pub fn create(
     let mut offers: Offers = disk::read(&path)?;
     offers
         .offers
-        .retain(|_, o| o.invitation.expires_at > Timestamp::now());
+        .retain(|_, o| result_until(o) > Timestamp::now());
     offers.offers.insert(
         invitation.token.clone(),
         Offer {
@@ -108,22 +122,40 @@ pub fn create(
     Ok(invitation)
 }
 
-/// True while an invitation in `dir` can still give an unknown device an
-/// answer. Only then can an unknown device use the pairing protocol.
-/// An accepted device is in the allow list and does not need this.
+/// True while an invitation in `dir` waits for a claim or for the writer's
+/// answer, and has not expired.
 #[cfg(not(wasm_browser))]
 pub fn open(dir: &Path) -> bool {
+    let now = Timestamp::now();
+    read_offers(dir).is_some_and(|offers| {
+        offers
+            .offers
+            .values()
+            .any(|o| o.status == "pending" && o.invitation.expires_at > now)
+    })
+}
+
+/// True if the unknown endpoint `remote` can use the pairing protocol: an
+/// invitation is open, or `remote` claimed an invitation and its result window
+/// has not ended.
+#[cfg(not(wasm_browser))]
+pub fn admits(dir: &Path, remote: EndpointId) -> bool {
+    let now = Timestamp::now();
+    open(dir)
+        || read_offers(dir).is_some_and(|offers| {
+            offers.offers.values().any(|o| {
+                o.candidate.as_ref().is_some_and(|c| c.id == remote) && result_until(o) > now
+            })
+        })
+}
+
+#[cfg(not(wasm_browser))]
+fn read_offers(dir: &Path) -> Option<Offers> {
     match disk::read::<Offers>(&dir.join("pairing.json")) {
-        Ok(offers) => {
-            let now = Timestamp::now();
-            offers
-                .offers
-                .values()
-                .any(|o| o.status != "accepted" && o.invitation.expires_at > now)
-        }
+        Ok(offers) => Some(offers),
         Err(e) => {
             tracing::warn!("cannot read the pairing invitations: {e:#}");
-            false
+            None
         }
     }
 }
@@ -153,8 +185,15 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
         .offers
         .get_mut(&request.token)
         .context("the pairing invitation is not valid")?;
-    if offer.invitation.expires_at <= Timestamp::now() {
-        bail!("the pairing invitation expired");
+    let now = Timestamp::now();
+    if offer.invitation.expires_at <= now {
+        // After the deadline, only the device that claimed the invitation can
+        // read the writer's answer, and only for the result window.
+        let answered = offer.status != "pending";
+        let claimant = offer.candidate.as_ref().is_some_and(|c| c.id == remote);
+        if !(answered && claimant && result_until(offer) > now) {
+            bail!("the pairing invitation expired");
+        }
     }
     let claimed = match &offer.candidate {
         Some(candidate) if candidate.id != remote => {

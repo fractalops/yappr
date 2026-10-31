@@ -158,21 +158,39 @@ impl Drop for Serve {
     }
 }
 
-/// Read stderr up to the first `yappr follow <ticket>` line. Keep reading
-/// the rest in a thread, so the server never blocks on a full pipe.
+/// Read stderr up to the first `yappr follow <ticket>` line, for at most 30
+/// seconds. A thread reads all of stderr, so the server never blocks on a full
+/// pipe.
 fn read_ticket(stderr: ChildStderr) -> String {
-    let mut reader = BufReader::new(stderr);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || tx.send(line).is_err() {
+                // After the ticket, discard the rest so the pipe never fills.
+                std::io::copy(&mut reader, &mut std::io::sink()).ok();
+                return;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut seen = String::new();
     loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap() == 0 {
-            panic!("serve exited before it printed a ticket:\n{seen}");
-        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let line = match rx.recv_timeout(left) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("serve printed no ticket within 30 seconds:\n{seen}")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve exited before it printed a ticket:\n{seen}")
+            }
+        };
         seen.push_str(&line);
         if let Some(ticket) = line.trim().strip_prefix("yappr follow ") {
             let ticket = ticket.to_string();
             EndpointTicket::from_str(&ticket).expect("valid ticket");
-            std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
             return ticket;
         }
     }

@@ -1,14 +1,13 @@
 //! The follower's position in a feed, so a restart resumes where it stopped.
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context, Result};
 use iroh::EndpointId;
 
-use crate::{entry::is_plain_file_name, store};
+use crate::entry::is_plain_file_name;
 
 /// The last entry id that a follower printed, for one feed and one name.
 ///
@@ -44,15 +43,10 @@ impl Cursor {
         }
     }
 
-    /// Save `id` in one step, so a crash leaves the old or the new value.
+    /// Replace the saved value. A unique temporary file and a rename make the
+    /// change atomic. Other cursor names use other files.
     pub fn save(&self, id: u64) -> Result<()> {
-        let dir = self.path.parent().context("cursor has no directory")?;
-        store::create_private_dir(dir)?;
-        let tmp = self.path.with_extension("tmp");
-        let mut file = store::private_file(&tmp)?;
-        file.set_len(0)?;
-        writeln!(file, "{id}")?;
-        fs::rename(&tmp, &self.path).with_context(|| format!("write {}", self.path.display()))
+        crate::disk::write_bytes(&self.path, format!("{id}\n").as_bytes())
     }
 }
 

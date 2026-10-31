@@ -10,6 +10,21 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::entry::Entry;
 
+/// `text` with each control character written as an escape such as
+/// `\u{1b}`. Use it for text from another endpoint that reaches a terminal,
+/// so that the text cannot send terminal commands.
+pub fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The QUIC application error code for a denied connection.
 pub const DENIED_CODE: u32 = 403;
 /// The QUIC close reason for a denied connection.

@@ -117,10 +117,12 @@ impl Store {
         let path = self.dir.join(LOG);
         let mut opts = OpenOptions::new();
         opts.read(true).append(true).create(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-        opts.open(&path)
-            .with_context(|| format!("open {}", path.display()))
+        private_options(&mut opts);
+        let file = opts
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        make_private(&file, &path, 0o600)?;
+        Ok(file)
     }
 
     /// The id of the last complete entry, or 0 if the feed is empty.
@@ -222,7 +224,8 @@ fn rfind_newline(file: &mut File, end: u64) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
-/// Create a directory that only the owner can read.
+/// Create a directory that only the owner can read. An existing directory of
+/// this user loses access for other users.
 pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -230,17 +233,66 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder
         .create(dir)
-        .with_context(|| format!("create {}", dir.display()))
+        .with_context(|| format!("create {}", dir.display()))?;
+    let handle = File::open(dir).with_context(|| format!("open {}", dir.display()))?;
+    make_private(&handle, dir, 0o700)
 }
 
-/// Open or create a file that only the owner can read.
+/// Open or create a file that only the owner can read. The path must not be a
+/// symbolic link.
 pub(crate) fn private_file(path: &Path) -> Result<File> {
     let mut opts = OpenOptions::new();
     opts.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    private_options(&mut opts);
+    let file = opts
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    make_private(&file, path, 0o600)?;
+    Ok(file)
+}
+
+/// Create a new file that only the owner can read. The call fails if the path
+/// exists, also as a symbolic link, so a planted link cannot redirect the write.
+pub(crate) fn new_private_file(path: &Path) -> Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create_new(true);
+    private_options(&mut opts);
     opts.open(path)
-        .with_context(|| format!("open {}", path.display()))
+        .with_context(|| format!("create {}", path.display()))
+}
+
+/// Owner-only mode for a new file, and no symbolic link at the last path part.
+fn private_options(opts: &mut OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
+    let _ = opts;
+}
+
+/// Remove access for other users from a file or directory of this user. A file
+/// of another user is an error, because its owner controls its content.
+fn make_private(file: &File, path: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = file
+            .metadata()
+            .with_context(|| format!("read {}", path.display()))?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            anyhow::bail!("{} belongs to another user", path.display());
+        }
+        if meta.mode() & 0o077 != 0 {
+            file.set_permissions(fs::Permissions::from_mode(mode))
+                .with_context(|| format!("set the permissions of {}", path.display()))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (file, path, mode);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -57,7 +57,9 @@ fields `source`, `kind`, `title` and `body`. A field that a line does not have
 comes from the options (`--source`, `--kind`, `--title`). The writer sets `v`,
 `id` and `time`, so `post` ignores these fields in the input. `post` keeps all
 other fields in the entry. Thus the output of `follow --output json` is valid
-input. An entry is at most 768 KiB as a JSON line.
+input. With several writers, that output wraps each entry as
+`{"writer": ..., "entry": {...}}`. `post --json` takes the entry from such a
+line. An entry is at most 768 KiB as a JSON line.
 
 **Bad input lines.** With `--json`, `post` skips a line
 that is not valid, writes the reason to stderr, and continues. At the end it
@@ -215,5 +217,8 @@ Relays forward live traffic. They do not store entries for offline devices.
 A feed is in `$XDG_DATA_HOME/yappr/<feed>/`, or in the platform data directory.
 Use `--feed NAME` to select a feed. Use `--dir PATH` or `YAPPR_DIR` to select a directory.
 
-Files use owner-only permissions on Unix. Iroh encrypts connections.
+Files use owner-only permissions on Unix. When yappr opens an existing file or
+directory of your user, it removes access for other users. It refuses a file
+of another user and a symbolic link in place of a file. Iroh encrypts
+connections.
 This version does not encrypt local storage.

@@ -32,7 +32,7 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     store::create_private_dir(dir)?;
     let temp = dir.join(format!(".{}.tmp", random_id()));
     let result = (|| {
-        let mut file = store::private_file(&temp)?;
+        let mut file = store::new_private_file(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;

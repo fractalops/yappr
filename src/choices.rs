@@ -323,13 +323,31 @@ pub fn decide(store: &Store, responder: EndpointId, submission: Submission) -> R
             Record::Decision {
                 decision: decision.clone(),
             },
-            format!("Choice: {label}"),
+            decision_title(&label),
             String::new(),
             "yappr".into(),
             "decision",
         )?;
         Ok((Some(entry), decision))
     })
+}
+
+/// The title of a decision entry: "Choice: " and the label. A long label is cut
+/// at a character boundary, so the title fits the entry title limit. The full
+/// label stays in the question.
+#[cfg(not(wasm_browser))]
+fn decision_title(label: &str) -> String {
+    const PREFIX: &str = "Choice: ";
+    const MORE: &str = "…";
+    let room = crate::entry::MAX_TITLE - PREFIX.len();
+    if label.len() <= room {
+        return format!("{PREFIX}{label}");
+    }
+    let mut end = room - MORE.len();
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{PREFIX}{}{MORE}", &label[..end])
 }
 
 #[cfg(not(wasm_browser))]

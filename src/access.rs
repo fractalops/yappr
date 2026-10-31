@@ -2,10 +2,11 @@
 //!
 //! A ticket is an address, not a secret. Only the endpoint ids in the allow
 //! list can connect. The list is empty by default, so the default is deny.
+//! One exception: while a pairing invitation is open, an unknown endpoint can
+//! use the pairing protocol, and only that protocol.
 use std::{
     collections::BTreeSet,
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -91,14 +92,8 @@ impl AllowList {
 
     /// Replace the file in one step, so a reader never sees half a list.
     fn save(&self, ids: &BTreeSet<EndpointId>) -> Result<()> {
-        let tmp = self.path.with_extension("tmp");
-        let mut file = crate::store::private_file(&tmp)?;
-        file.set_len(0)?;
-        for id in ids {
-            writeln!(file, "{id}")?;
-        }
-        file.sync_all()?;
-        fs::rename(&tmp, &self.path).with_context(|| format!("write {}", self.path.display()))
+        let text: String = ids.iter().map(|id| format!("{id}\n")).collect();
+        crate::disk::write_bytes(&self.path, text.as_bytes())
     }
 
     pub fn path(&self) -> &Path {
@@ -129,7 +124,11 @@ impl EndpointHooks for AccessHook {
             tracing::info!("accepted {remote}");
             AfterHandshakeOutcome::accept()
         } else if conn.alpn() == crate::pairing::ALPN
-            && self.list.path().parent().is_some_and(crate::pairing::open)
+            && self
+                .list
+                .path()
+                .parent()
+                .is_some_and(|dir| crate::pairing::admits(dir, remote))
         {
             tracing::info!("accepted {remote} to pair");
             AfterHandshakeOutcome::accept()

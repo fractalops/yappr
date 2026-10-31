@@ -1,6 +1,12 @@
 //! Endpoint setup and the local identity.
 #[cfg(not(wasm_browser))]
-use std::{fs, io::Write, net::Ipv4Addr, path::Path, str::FromStr};
+use std::{
+    fs,
+    io::{Read, Write},
+    net::Ipv4Addr,
+    path::Path,
+    str::FromStr,
+};
 
 use anyhow::{Context, Result};
 use iroh::{
@@ -212,13 +218,19 @@ pub fn load_or_create_secret(dir: &Path) -> Result<SecretKey> {
     }
     let _lock = crate::disk::lock(dir, "identity.lock")?;
     let path = dir.join("secret.key");
-    match fs::read_to_string(&path) {
-        Ok(text) => SecretKey::from_str(text.trim())
-            .with_context(|| format!("{} is not a valid secret key", path.display())),
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            // The open checks the owner, removes access for other users, and
+            // refuses a symbolic link.
+            let mut text = String::new();
+            store::private_file(&path)?.read_to_string(&mut text)?;
+            SecretKey::from_str(text.trim())
+                .with_context(|| format!("{} is not a valid secret key", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             store::create_private_dir(dir)?;
             let key = SecretKey::generate();
-            let mut file = store::private_file(&path)?;
+            let mut file = store::new_private_file(&path)?;
             writeln!(file, "{}", data_encoding::HEXLOWER.encode(&key.to_bytes()))?;
             file.sync_all()?;
             Ok(key)

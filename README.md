@@ -21,25 +21,37 @@ cargo install --git https://github.com/fractalops/yappr
 
 In this example, `server` writes the feed and `laptop` reads it.
 
-On the server, start the feed and create a pairing code:
+On the server, start the feed:
 
 ```sh
-server$ yappr serve
-server$ yappr pair --alias laptop      # in a second terminal
+yappr serve
+```
+
+In a second terminal on the server, create a pairing code for the laptop:
+
+```sh
+yappr pair --alias laptop
 ```
 
 On the laptop, join with that code:
 
 ```sh
-laptop$ yappr join 'yappr://pair/...' --name laptop --alias server
+yappr join 'yappr://pair/...' --name laptop --alias server
 ```
 
 Compare the laptop's device ID with the ID on the server. Then enter `y` on
-the server. Now the laptop can follow the feed:
+the server.
+
+On the laptop, follow the feed:
 
 ```sh
-laptop$ yappr follow server
-server$ echo "Backup complete" | yappr post --source backup
+yappr follow server
+```
+
+On the server, post an entry. It appears on the laptop:
+
+```sh
+echo "Backup complete" | yappr post --source backup
 ```
 
 ## Examples
@@ -79,12 +91,17 @@ esac
 
 ### Answer a question
 
-Find the question ID in the JSON output, then answer:
+On the laptop, find the question ID in the JSON output:
 
 ```sh
-laptop$ yappr follow server --no-follow --output json \
+yappr follow server --no-follow --output json \
   | jq -r 'select(.kind == "question") | "\(.choices.question.id)  \(.title)"'
-laptop$ yappr answer server <QUESTION_ID> --choice approve
+```
+
+Then answer it:
+
+```sh
+yappr answer server <QUESTION_ID> --choice approve
 ```
 
 If the server is not reachable, the answer waits in a local outbox.

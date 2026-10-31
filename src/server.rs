@@ -25,8 +25,10 @@ const POLL: Duration = Duration::from_millis(100);
 const LINGER: Duration = Duration::from_secs(10);
 /// How many entries to read from disk in one step.
 const BATCH: usize = 256;
-/// How often a live follower's access is checked when no entries arrive.
-const RECHECK: Duration = Duration::from_secs(5);
+/// How often each connection checks that its follower is still allowed.
+const ACCESS_CHECK: Duration = Duration::from_secs(1);
+/// How long a follower has to send its request.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The follower lost access while it was reading.
 #[derive(Debug)]
@@ -182,6 +184,19 @@ struct FeedProtocol {
 impl ProtocolHandler for FeedProtocol {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
+        // Close the connection when the follower loses access, also while the
+        // server waits for its request or for a slow replay.
+        let allow_list = self.store.allow_list();
+        let guarded = conn.clone();
+        let _guard = AbortOnDropHandle::new(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(ACCESS_CHECK).await;
+                if !allow_list.contains(&remote) {
+                    guarded.close(VarInt::from_u32(DENIED_CODE), DENIED_REASON);
+                    return;
+                }
+            }
+        }));
         let (mut send, mut recv) = conn.accept_bi().await?;
         if let Err(e) = self.serve(&mut send, &mut recv, remote).await {
             tracing::debug!("{remote}: {e:#}");
@@ -211,10 +226,15 @@ impl FeedProtocol {
         recv: &mut RecvStream,
         remote: EndpointId,
     ) -> Result<()> {
-        let req: Request = proto::read_frame(recv, proto::MAX_REQUEST)
-            .await?
-            .context("no request")?;
+        let req: Request =
+            tokio::time::timeout(REQUEST_TIMEOUT, proto::read_frame(recv, proto::MAX_REQUEST))
+                .await
+                .context("the follower sent no request in time")??
+                .context("no request")?;
         tracing::debug!("request {req:?}");
+        if !self.store.allow_list().contains(&remote) {
+            return Err(Revoked.into());
+        }
         // Include every entry that is on disk now, not only the entries that
         // the last poll saw.
         self.watcher.lock().await.sync().await?;
@@ -260,9 +280,9 @@ impl FeedProtocol {
             return Ok(());
         }
 
-        // Live tail. A follower that loses access stops at the next check.
+        // Live tail. A follower that loses access gets no more entries. The
+        // connection guard closes the connection too.
         let allow_list = self.store.allow_list();
-        let mut recheck = tokio::time::interval(RECHECK);
         loop {
             tokio::select! {
                 changed = head_rx.changed() => {
@@ -270,7 +290,6 @@ impl FeedProtocol {
                         return Ok(()); // the server stops
                     }
                 }
-                _ = recheck.tick() => {}
                 _ = send.stopped() => return Ok(()), // the follower left
             }
             if !allow_list.contains(&remote) {
@@ -288,6 +307,9 @@ impl FeedProtocol {
 
 /// Send one entry. Returns false when the limit is reached.
 async fn send_entry(send: &mut SendStream, entry: Entry, budget: &mut u64) -> Result<bool> {
+    if *budget == 0 {
+        return Ok(false);
+    }
     proto::write_frame(send, &Frame::Entry { entry }, proto::MAX_FRAME).await?;
     *budget -= 1;
     Ok(*budget > 0)

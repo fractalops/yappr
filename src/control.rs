@@ -296,7 +296,12 @@ impl ControlClient {
             .await?
         {
             Reply::Accepted { decision } => Ok(decision),
-            Reply::Rejected { error } => Err(error.into()),
+            // The text comes from the writer and can reach a terminal.
+            Reply::Rejected { error } => Err(ChoiceError::new(
+                &proto::printable(&error.code),
+                &proto::printable(&error.message),
+            )
+            .into()),
             _ => anyhow::bail!("the writer sent an unexpected response"),
         }
     }

@@ -64,7 +64,7 @@ pub async fn run(
                 None => break,
                 Some(Input::Failed(e)) => return Err(e.into()),
                 Some(Input::Bad(n, invalid)) => post.skip(&format!("line {n}"), &invalid)?,
-                Some(Input::Line(n, line)) => match Draft::from_json(&line, defaults) {
+                Some(Input::Line(n, line)) => match Draft::from_json(&unwrap_writer(&line), defaults) {
                     Ok(draft) => post.one(draft, &format!("line {n}"))?,
                     Err(invalid) => post.skip(&format!("line {n}"), &invalid)?,
                 },
@@ -105,6 +105,20 @@ impl<O: Write, E: Write> Poster<'_, O, E> {
         self.rejected += 1;
         Ok(())
     }
+}
+
+/// The entry of a line from `follow --output json` with several writers. That
+/// output wraps each entry as `{"writer": ..., "entry": {...}}`. Other lines
+/// stay as they are.
+fn unwrap_writer(line: &str) -> std::borrow::Cow<'_, str> {
+    if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str(line) {
+        if map.len() == 2 && map.contains_key("writer") {
+            if let Some(entry @ serde_json::Value::Object(_)) = map.remove("entry") {
+                return std::borrow::Cow::Owned(entry.to_string());
+            }
+        }
+    }
+    std::borrow::Cow::Borrowed(line)
 }
 
 /// Read lines on a blocking thread. A line is at most [`entry::MAX_ENTRY`]

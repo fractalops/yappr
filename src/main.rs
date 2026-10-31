@@ -928,12 +928,16 @@ fn deny(common: &CommonArgs, target: String) -> Result<()> {
 /// Aliases and allowed IDs in one list. A terminal gets a header and short
 /// IDs. A pipe gets full IDs, one tab-separated device per line.
 fn devices(common: &CommonArgs) -> Result<()> {
-    let mut allowed = common.store()?.allow_list().load()?;
+    let allowed = common.store()?.allow_list().load()?;
     let mut rows = Vec::new();
+    let mut named = std::collections::BTreeSet::new();
     for (alias, peer) in peers::list(&common.dir()?)? {
-        rows.push((alias, peer.id, allowed.remove(&peer.id)));
+        // Several aliases can name one device. Each row reports its access.
+        rows.push((alias, peer.id, allowed.contains(&peer.id)));
+        named.insert(peer.id);
     }
-    rows.extend(allowed.into_iter().map(|id| ("-".to_string(), id, true)));
+    let unnamed = allowed.iter().filter(|id| !named.contains(*id));
+    rows.extend(unnamed.map(|id| ("-".to_string(), *id, true)));
     let terminal = io::stdout().is_terminal();
     if terminal && !rows.is_empty() {
         println!("{:<16} {:<10} READS THIS FEED", "ALIAS", "ID");
@@ -1201,7 +1205,13 @@ async fn join(common: &CommonArgs, text: &str, name: String, alias: Option<Strin
     let client = ControlClient::new(endpoint.clone());
     let result = async {
         loop {
-            if invitation.expires_at <= Timestamp::now() {
+            // The writer answers a claimed invitation for a short time after
+            // its deadline, so keep asking until that window ends.
+            let last_ask = invitation
+                .expires_at
+                .checked_add(pairing::RESULT_WINDOW)
+                .unwrap_or(invitation.expires_at);
+            if last_ask <= Timestamp::now() {
                 bail!("the invitation expired. Create a new invitation on the writer");
             }
             let reply: pairing::PairReply = client
@@ -1229,9 +1239,9 @@ async fn join(common: &CommonArgs, text: &str, name: String, alias: Option<Strin
                     println!("{}", invitation.ticket);
                     return Ok(());
                 }
-                "rejected" => bail!("{}", reply.message),
+                "rejected" => bail!("{}", yappr::proto::printable(&reply.message)),
                 _ => {
-                    eprintln!("{}", reply.message);
+                    eprintln!("{}", yappr::proto::printable(&reply.message));
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
@@ -1349,7 +1359,7 @@ async fn run(args: Args) -> Result<()> {
     }
 }
 
-/// The exit code for an error. The README documents these codes.
+/// The exit code for an error. docs/scripting.md documents these codes.
 fn exit_code(err: &anyhow::Error) -> i32 {
     if is_broken_pipe(err) {
         // the reader of stdout left, for example "yappr follow ... | head"
@@ -1367,7 +1377,10 @@ fn exit_code(err: &anyhow::Error) -> i32 {
         }
     } else if err.downcast_ref::<Denied>().is_some() {
         3
-    } else if err.downcast_ref::<Invalid>().is_some() || err.downcast_ref::<Rejected>().is_some() {
+    } else if err.downcast_ref::<Invalid>().is_some()
+        || err.downcast_ref::<Rejected>().is_some()
+        || err.downcast_ref::<yappr::client::OutOfOrder>().is_some()
+    {
         4
     } else if err.downcast_ref::<Unreachable>().is_some() {
         5

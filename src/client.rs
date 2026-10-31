@@ -58,12 +58,34 @@ pub struct Subscription {
     conn: Connection,
     recv: RecvStream,
     me: EndpointId,
+    /// The id of the last entry: the request's `since` until an entry arrives.
+    last: u64,
 }
+
+/// The writer sent an entry id that is not greater than the id before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutOfOrder {
+    pub previous: u64,
+    pub got: u64,
+}
+
+impl fmt::Display for OutOfOrder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the writer sent entry {} after entry {}. Entry ids must increase",
+            self.got, self.previous
+        )
+    }
+}
+
+impl std::error::Error for OutOfOrder {}
 
 impl Subscription {
     /// The next frame, or `None` when the server ends the stream.
     ///
-    /// Each entry is checked against the entry rules before it is returned.
+    /// Each entry is checked against the entry rules, and its id must be greater
+    /// than the id before it.
     pub async fn next(&mut self) -> Result<Option<Frame>> {
         let frame = proto::read_frame(&mut self.recv, proto::MAX_FRAME)
             .await
@@ -73,9 +95,19 @@ impl Subscription {
                 entry
                     .validate()
                     .with_context(|| format!("entry {} from the writer is not valid", entry.id))?;
+                if entry.id <= self.last {
+                    return Err(OutOfOrder {
+                        previous: self.last,
+                        got: entry.id,
+                    }
+                    .into());
+                }
+                self.last = entry.id;
                 Ok(Some(Frame::Entry { entry }))
             }
-            Some(Frame::Error { message }) => bail!("the writer sent an error: {message}"),
+            Some(Frame::Error { message }) => {
+                bail!("the writer sent an error: {}", proto::printable(&message))
+            }
             other => Ok(other),
         }
     }
@@ -103,7 +135,12 @@ pub async fn subscribe(
     }
     .await;
     let recv = opened.map_err(|e| explain(&conn, me, e))?;
-    Ok(Subscription { conn, recv, me })
+    Ok(Subscription {
+        conn,
+        recv,
+        me,
+        last: req.since,
+    })
 }
 
 async fn connect(endpoint: &Endpoint, addr: EndpointAddr, alpn: &[u8]) -> Result<Connection> {
@@ -252,5 +289,7 @@ impl Follower {
 
 /// Errors that a new connection does not fix.
 pub fn is_final(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<Denied>().is_some() || err.downcast_ref::<crate::entry::Invalid>().is_some()
+    err.downcast_ref::<Denied>().is_some()
+        || err.downcast_ref::<crate::entry::Invalid>().is_some()
+        || err.downcast_ref::<OutOfOrder>().is_some()
 }

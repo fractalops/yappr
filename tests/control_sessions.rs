@@ -71,7 +71,8 @@ async fn requests_share_one_session_and_revocation_applies_to_open_sessions() {
         });
     }
     while let Some(reply) = tasks.join_next().await {
-        assert!(matches!(reply.unwrap(), Reply::Rejected { .. }));
+        // The question does not exist. Access is still allowed.
+        assert!(matches!(reply.unwrap(), Reply::Rejected { error } if error.code == "not_found"));
     }
     assert_eq!(handler.accepted.load(Ordering::SeqCst), 1);
     store.allow_list().deny(&client.endpoint().id()).unwrap();
@@ -93,8 +94,9 @@ async fn a_closed_session_reconnects() {
         .exchange(addr.clone(), control::ALPN, &request())
         .await
         .unwrap();
-    handler.connections.lock().unwrap()[0].close(VarInt::from_u32(0), b"test reconnect");
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let first = handler.connections.lock().unwrap()[0].clone();
+    first.close(VarInt::from_u32(0), b"test reconnect");
+    first.closed().await;
     let _: Reply = client
         .exchange(addr, control::ALPN, &request())
         .await

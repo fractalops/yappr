@@ -126,7 +126,7 @@ fn simultaneous_answers_have_one_final_decision() {
     assert_eq!(
         workers
             .into_iter()
-            .filter_map(|w| w.join().ok())
+            .map(|w| w.join().expect("a worker panicked"))
             .filter(|ok| *ok)
             .count(),
         1
@@ -155,13 +155,13 @@ fn cancellation_and_expiry_reject_late_answers() {
         responder,
         Some(
             Timestamp::now()
-                .checked_add(jiff::SignedDuration::from_millis(80))
+                .checked_add(jiff::SignedDuration::from_millis(400))
                 .unwrap(),
         ),
         false,
     );
     q = choices::create(&store, q).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(500));
     assert_eq!(
         code(choices::decide(&store, responder, submission(&q.id, "retry")).unwrap_err()),
         "expired"
@@ -219,7 +219,7 @@ async fn revoked_device_receives_a_final_rejection() {
 }
 
 #[tokio::test]
-async fn lost_acknowledgment_and_writer_restart_keep_one_decision() {
+async fn retry_after_a_lost_outbox_update_and_writer_restart_keeps_one_decision() {
     let writer_dir = tempfile::tempdir().unwrap();
     let device_dir = tempfile::tempdir().unwrap();
     let store = Store::open(writer_dir.path()).unwrap();

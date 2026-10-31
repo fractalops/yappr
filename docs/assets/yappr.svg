@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>Yappr</title>
+  <rect width="32" height="32" rx="7" fill="#101114" />
+  <g transform="translate(4 4)" fill="none" stroke="#e0e3e8" stroke-width="1.7" stroke-linejoin="round">
+    <path d="M6.5 4h11A3.5 3.5 0 0 1 21 7.5v7a3.5 3.5 0 0 1-3.5 3.5h-.7l1.4 3.3L14 18H6.5A3.5 3.5 0 0 1 3 14.5v-7A3.5 3.5 0 0 1 6.5 4z" />
+    <circle cx="9" cy="11" r="1.2" fill="#e0e3e8" stroke="none" />
+    <circle cx="15" cy="11" r="1.2" fill="#e0e3e8" stroke="none" />
+  </g>
+</svg>

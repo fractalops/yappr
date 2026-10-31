@@ -1,6 +1,8 @@
+<img src="docs/assets/yappr.svg" alt="Yappr logo" width="64" height="64" />
+
 # Yappr
 
-**Give your scripts a way to reach you—and get an answer.**
+**Give your scripts and agents a way to reach you—and get an answer.**
 
 Yappr brings updates, questions, and approval requests from your machines to
 your other devices. A script can wait for your reply before it continues. Each
@@ -17,13 +19,19 @@ df -h / | yappr post --source disk --title "Disk usage"
 yappr approve laptop "Deploy to production?" && ./deploy
 ```
 
+## Try it
+
+Open [yappr.run](https://yappr.run/) on your phone or computer to read feeds
+and answer questions. After installing the CLI on your computer, run
+[`yappr init`](#start-with-yappr-init) to pair the browser app.
+
 ## Install
 
 ```sh
 cargo install --git https://github.com/fractalops/yappr
 ```
 
-## Quick start
+## Start with `yappr init`
 
 Here, `server` posts updates and asks questions. `laptop` reads them and sends
 your answers.
@@ -34,7 +42,12 @@ On the server, start the feed and pair your first device:
 yappr init
 ```
 
-The server shows a QR code and a pairing code that starts with `YAPPR:`.
+<img src="docs/assets/init.gif" alt="yappr init shows a pairing code, accepts a laptop, and keeps serving the feed" width="800" />
+
+`init` creates the local feed and device identity if needed, then starts the
+server. It opens a five-minute pairing invitation and shows a QR code in the
+terminal. It also prints a pairing code that starts with `YAPPR:`.
+
 On a phone, open [yappr.run](https://yappr.run) and scan the QR code.
 On the laptop, print its device ID, then join with the server's pairing code:
 

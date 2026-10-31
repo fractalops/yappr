@@ -108,6 +108,8 @@ pub async fn subscribe(
 
 async fn connect(endpoint: &Endpoint, addr: EndpointAddr, alpn: &[u8]) -> Result<Connection> {
     let writer = addr.id;
+    #[cfg(wasm_browser)]
+    let addr = crate::net::browser_addr(addr);
     match n0_future::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, alpn)).await {
         Ok(Ok(conn)) => Ok(conn),
         Ok(Err(e)) => Err(Unreachable {

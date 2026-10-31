@@ -114,11 +114,40 @@ pub async fn bind(secret: SecretKey, relays: &RelaySettings) -> Result<Endpoint>
     if relays.disabled {
         anyhow::bail!("a browser needs a relay");
     }
-    let mut builder = Endpoint::builder(presets::N0).secret_key(secret);
-    if let Some(mode) = relays.relay_mode()? {
-        builder = builder.relay_mode(mode);
+    let urls: Vec<RelayUrl> = match relays.relay_mode()? {
+        Some(RelayMode::Custom(map)) => map.urls(),
+        _ => iroh::defaults::prod::default_relay_map().urls(),
+    };
+    let map = RelayMap::from_iter(urls.iter().map(without_trailing_dot));
+    Ok(Endpoint::builder(presets::N0)
+        .secret_key(secret)
+        .relay_mode(RelayMode::Custom(map))
+        .bind()
+        .await?)
+}
+
+/// `url` without the trailing dot of its host name. WebKit sends that dot in
+/// the TLS server name, and a relay refuses such a handshake.
+#[cfg(wasm_browser)]
+fn without_trailing_dot(url: &RelayUrl) -> RelayUrl {
+    match url.host_str() {
+        Some(host) if host.ends_with('.') => url
+            .to_string()
+            .replacen(host, host.trim_end_matches('.'), 1)
+            .parse()
+            .unwrap_or_else(|_| url.clone()),
+        _ => url.clone(),
     }
-    Ok(builder.bind().await?)
+}
+
+/// `addr` with relay URLs that a browser can open. See [`without_trailing_dot`].
+#[cfg(wasm_browser)]
+pub fn browser_addr(addr: EndpointAddr) -> EndpointAddr {
+    let addrs = addr.addrs.into_iter().map(|a| match a {
+        iroh::TransportAddr::Relay(url) => iroh::TransportAddr::Relay(without_trailing_dot(&url)),
+        other => other,
+    });
+    EndpointAddr::from_parts(addr.id, addrs)
 }
 
 /// Bind an endpoint. `hook` controls access to incoming connections.

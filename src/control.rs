@@ -248,6 +248,8 @@ impl ControlClient {
         if let Some(conn) = &slot.connection {
             return Ok(conn.clone());
         }
+        #[cfg(wasm_browser)]
+        let addr = crate::net::browser_addr(addr);
         let conn = self.endpoint.connect(addr, alpn).await?;
         slot.connection = Some(conn.clone());
         Ok(conn)

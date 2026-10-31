@@ -65,18 +65,39 @@ line. An entry is at most 768 KiB as a JSON line.
 that is not valid, writes the reason to stderr, and continues. At the end it
 exits with code 4.
 
-**Exit codes:**
+## Exit codes
 
-| code | meaning                                                         |
-|------|-----------------------------------------------------------------|
-| 0    | success. `read` also gives 0 on Ctrl-C, or when the reader of its output stops (`\| head`) |
-| 1    | any other error                                                 |
-| 2    | usage error                                                     |
-| 3    | the writer does not allow this device                           |
-| 4    | an entry is not valid (input to `post`, or an entry that `read` received) |
-| 5    | the device cannot reach the writer. `read -f` tries again, so only `read` without `-f` gives 5 |
+Every command uses the same codes, so a script can branch on them.
 
-For example, a cron job can treat code 5 as "try later":
+| code | meaning | commands |
+|------|---------|----------|
+| 0 | success. For `approve`, the request was approved | all |
+| 1 | any other error | all |
+| 2 | usage error | all |
+| 3 | the writer does not allow this device | `read`, `answer`, `health`, `retry` |
+| 4 | an entry or a choice is not valid | `post`, `read`, `answer`, `retry` |
+| 5 | the device cannot reach the writer | `read` (without `-f`), `answer`, `health`, `retry` |
+| 6 | the question expired before an answer | `ask`, `approve`, `wait`, `answer`, `retry` |
+| 7 | the responder rejected the request | `approve`, `wait` |
+| 8 | the question was cancelled, or Ctrl-C stopped the wait | `ask`, `approve`, `wait`, `answer`, `retry` |
+
+`read` also gives 0 on Ctrl-C, or when the reader of its output stops
+(`| head`). `read -f` tries again when it cannot reach the writer, so it does
+not give 5. `ask` gives 0 for every choice, also for a choice named `reject`.
+
+In a pipeline, use the code of `approve` to decide the next step:
+
+```sh
+yappr approve ops "Deploy $COMMIT to production?" --timeout 20m
+case $? in
+  0) ./deploy ;;
+  7) echo "Rejected" ;;
+  6) echo "No answer in time" ;;
+  *) exit 1 ;;
+esac
+```
+
+A cron job can treat code 5 as "try later":
 
 ```
 yappr read <ticket> --output json >> alerts.ndjson || [ $? -eq 5 ]
@@ -102,15 +123,8 @@ Use `yappr wait ID` to read the result later.
 `yappr questions --output json` prints one question state per line.
 Use `yappr cancel ID` to cancel a pending question.
 
-A generic choice named `reject` still returns code 0.
 For an approval, the preset values are `approve` and `reject`.
-Approval rejection returns code 7. `wait` preserves this approval behavior.
-
-| Code | Additional meaning |
-|---|---|
-| 6 | The question expired. |
-| 7 | The responder rejected an approval request. |
-| 8 | The writer cancelled the question, or the question creator stopped its wait with Ctrl-C. |
+The [exit codes](#exit-codes) table lists the result codes of `ask`, `approve` and `wait`.
 
 `yappr answer WRITER ID --choice VALUE` saves a submission locally before it contacts the writer.
 On success, it prints the decision as JSON.

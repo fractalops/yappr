@@ -98,7 +98,8 @@ fi
 ```
 
 `approve` exits with 0 for approval, 7 for rejection, 6 for expiry, or 8 for
-cancellation. The script runs `deploy` after approval.
+cancellation. The script runs `deploy` after approval. All commands share the
+same [exit codes](docs/scripting.md#exit-codes).
 
 ### Choose what a script does next
 

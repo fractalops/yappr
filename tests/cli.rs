@@ -874,6 +874,16 @@ fn post_json_accepts_a_line_larger_than_a_body() {
 }
 
 #[test]
+fn answer_and_retry_give_5_when_the_writer_is_offline() {
+    let (writer, device) = pair();
+    let approval = writer.run(["approve", &device.id(), "Deploy?", "--no-wait"]);
+    let ticket = Serve::start(&writer).ticket.clone();
+    let answer = ["answer", &ticket, approval.trim(), "--choice", "approve"];
+    assert_eq!(device.exit(answer, b"").0, 5);
+    assert_eq!(device.exit(["retry"], b"").0, 5);
+}
+
+#[test]
 fn questions_and_approvals_return_distinct_outcomes() {
     let (writer, device) = pair();
     let serve = Serve::start(&writer);

@@ -1264,7 +1264,17 @@ async fn retry(common: &CommonArgs) -> Result<()> {
             Ok(decision) => println!("{}", serde_json::to_string(&decision)?),
             Err(error) => {
                 eprintln!("{}: {error:#}", delivery.submission.question_id);
-                failure = Some(error);
+                // A writer that answered keeps its own code. Any other
+                // failure means that the writer did not confirm the choice.
+                failure = Some(if error.downcast_ref::<choices::ChoiceError>().is_some() {
+                    error
+                } else {
+                    Unreachable {
+                        writer: delivery.writer.parse()?,
+                        reason: "the writer did not confirm the choice".into(),
+                    }
+                    .into()
+                });
             }
         }
     }

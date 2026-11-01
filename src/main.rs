@@ -86,27 +86,32 @@ struct CommonArgs {
 enum Commands {
     /// Add one entry to the local feed and print its id.
     ///
-    /// The body comes from stdin, or from --body. The serve command does not
-    /// have to run.
+    /// The body comes from stdin, or from --body. The start command does not
+    /// have to run. Without it, post delivers the entry to the devices that
+    /// receive the feed.
     #[clap(after_help = "Examples:
   df -h / | yappr post --source disk --title \"Disk usage\"
   yappr post --kind deploy.finished --subject deploy/web --data '{\"version\":\"1.4.2\"}' --body \"v1.4.2 is live\"
   yappr read laptop -f --output json | jq -c 'select(.level == \"alert\")' | yappr post --json")]
     Post(PostArgs),
 
-    /// Serve the feed, pair one device, and keep serving.
+    /// Serve the feed, and deliver it to the devices that receive it.
     ///
-    /// Use it on the writer the first time. Later, start the writer with
-    /// serve, and pair more devices with pair.
+    /// The first start pairs one device. With --pair, start pairs a device
+    /// also when other devices can read the feed. To pair more devices while
+    /// start runs, use pair in a second terminal. Prints the ticket on stderr.
     #[clap(after_help = "Examples:
-  yappr init
-  yappr init --name \"Work laptop\"")]
-    Init(InitArgs),
+  yappr start
+  yappr start --pair --name \"Work laptop\"")]
+    Start(StartArgs),
 
-    /// Serve the local feed to the allowed devices.
-    ///
-    /// Prints the ticket on stderr.
-    Serve(ServeArgs),
+    /// The same as "start --pair".
+    #[clap(hide = true)]
+    Init(StartArgs),
+
+    /// The same as "start", but it does not pair the first device.
+    #[clap(hide = true)]
+    Serve(StartArgs),
 
     /// Print the new entries of a feed. With --follow, wait for more.
     ///
@@ -242,7 +247,7 @@ enum Commands {
         #[clap(long, value_enum)]
         output: Option<Format>,
     },
-    /// Pair a device with an expiring invitation while serve runs.
+    /// Pair a device with an expiring invitation while start runs.
     #[clap(after_help = "Examples:
   yappr pair
   yappr pair --accept <ID>    (confirm from another terminal)")]
@@ -364,7 +369,10 @@ struct ApprovalArgs {
     question: QuestionArgs,
 }
 #[derive(clap::Args, Debug)]
-struct InitArgs {
+struct StartArgs {
+    /// Pair a device, also when other devices can read the feed.
+    #[clap(long)]
+    pair: bool,
     /// The writer name shown on the joining device. The default is the host
     /// name.
     #[clap(long)]
@@ -376,7 +384,9 @@ struct InitArgs {
     /// How long the invitation stays open, such as 5m or 1h.
     #[clap(long = "timeout", alias = "expires", value_parser = parse_interval, default_value = "5m")]
     expires: Duration,
-    /// The UDP port for IPv4. See serve --port.
+    /// The UDP port for IPv4. With a fixed port, the ticket stays valid after
+    /// a restart, also when no relay is available. The default is a random
+    /// port.
     #[clap(long)]
     port: Option<u16>,
 }
@@ -400,15 +410,6 @@ struct PairArgs {
     /// Reject a pending device by its full endpoint ID.
     #[clap(long, conflicts_with = "accept")]
     reject: Option<String>,
-}
-
-#[derive(clap::Args, Debug)]
-struct ServeArgs {
-    /// The UDP port for IPv4. With a fixed port, the ticket stays valid after
-    /// a restart, also when no relay is available. The default is a random
-    /// port.
-    #[clap(long)]
-    port: Option<u16>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -809,7 +810,7 @@ impl std::fmt::Display for Undelivered {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the entry is saved, but {} did not confirm it. \"yappr serve\" or \"yappr retry\" delivers it later",
+            "the entry is saved, but {} did not confirm it. \"yappr start\" or \"yappr retry\" delivers it later",
             self.devices.join(", ")
         )
     }
@@ -881,14 +882,6 @@ fn short_ticket(addr: &EndpointAddr) -> EndpointTicket {
     short.into()
 }
 
-async fn serve(common: &CommonArgs, args: ServeArgs) -> Result<()> {
-    let (_store, server, _ticket, _lock) = start_serving(common, args.port, true).await?;
-    tokio::signal::ctrl_c().await?;
-    eprintln!("got ctrl-c, exiting");
-    server.shutdown().await;
-    Ok(())
-}
-
 /// The lock that a running writer holds. Other commands then leave delivery
 /// to the writer.
 const SERVE_LOCK: &str = "serve.lock";
@@ -903,7 +896,7 @@ async fn start_serving(
 ) -> Result<(Store, Server, EndpointTicket, std::fs::File)> {
     let store = common.store()?;
     let lock = disk::try_lock(store.dir(), SERVE_LOCK)?
-        .with_context(|| format!("yappr already serves {}", store.dir().display()))?;
+        .with_context(|| format!("yappr start already runs for {}", store.dir().display()))?;
     let opts = common.net(port)?;
     let wait_for_relay = opts.network == Network::Default && !opts.relays.disabled;
     let server = Server::spawn(store.clone(), common.secret()?, opts).await?;
@@ -940,25 +933,42 @@ async fn start_serving(
     Ok((store, server, ticket, lock))
 }
 
-async fn init(common: &CommonArgs, args: InitArgs) -> Result<()> {
+/// When `start` pairs a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pairing {
+    /// When no device can read the feed.
+    First,
+    Always,
+    Never,
+}
+
+async fn start(common: &CommonArgs, args: StartArgs, pairing: Pairing) -> Result<()> {
     if let Some(alias) = &args.alias {
         peers::validate_alias(alias)?;
     }
-    let (store, server, ticket, _lock) = start_serving(common, args.port, false).await?;
-    let name = args.name.unwrap_or_else(hostname);
-    let outcome =
-        pairing_session(&store, ticket.to_string(), name, args.expires, args.alias).await?;
-    match outcome {
-        PairOutcome::Interrupted => {
-            server.shutdown().await;
-            return Ok(());
+    let pairing = match pairing {
+        Pairing::First if args.pair => Pairing::Always,
+        pairing => pairing,
+    };
+    let (store, server, ticket, _lock) =
+        start_serving(common, args.port, pairing == Pairing::Never).await?;
+    let first = store.allow_list().load()?.is_empty();
+    if pairing == Pairing::Always || (pairing == Pairing::First && first) {
+        let name = args.name.unwrap_or_else(hostname);
+        let outcome =
+            pairing_session(&store, ticket.to_string(), name, args.expires, args.alias).await?;
+        match outcome {
+            PairOutcome::Interrupted => {
+                server.shutdown().await;
+                return Ok(());
+            }
+            PairOutcome::Expired => {
+                eprintln!("The invitation expired. To pair a device, run \"yappr pair\".")
+            }
+            PairOutcome::Accepted | PairOutcome::Rejected => {}
         }
-        PairOutcome::Expired => {
-            eprintln!("The invitation expired. To pair a device, run \"yappr pair\".")
-        }
-        PairOutcome::Accepted | PairOutcome::Rejected => {}
+        eprintln!("Serving. Press Ctrl-C to stop.");
     }
-    eprintln!("Serving. Press Ctrl-C to stop. Next time, start the writer with \"yappr serve\".");
     tokio::signal::ctrl_c().await?;
     eprintln!("got ctrl-c, exiting");
     server.shutdown().await;
@@ -1556,7 +1566,7 @@ fn deny(common: &CommonArgs, target: String) -> Result<()> {
     let id = peers::resolve(&common.dir()?, &target)?.id;
     let list = common.store()?.allow_list();
     if list.deny(&id)? {
-        eprintln!("denied {id}. A running serve closes its feed within 5 seconds");
+        eprintln!("denied {id}. A running start closes its feed within 5 seconds");
     } else {
         eprintln!("{id} was not allowed");
     }
@@ -1614,7 +1624,7 @@ fn status(common: &CommonArgs, text: bool) -> Result<()> {
     );
     println!();
     if peers.is_empty() {
-        println!("peers      none. Run \"yappr init\" or \"yappr pair\" to pair a device.");
+        println!("peers      none. Run \"yappr start\" to pair a device.");
     } else {
         println!("peers                            reads this feed  receives entries");
         let yes = |b: bool| if b { "yes" } else { "no" };
@@ -1986,7 +1996,7 @@ async fn pair(common: &CommonArgs, args: PairArgs) -> Result<()> {
         return pairing::confirm(&store, peers::resolve(store.dir(), &target)?.id, false);
     }
     let ticket: Option<String> = disk::read(&store.dir().join("endpoint.json"))?;
-    let ticket = ticket.context("start yappr serve before you create an invitation")?;
+    let ticket = ticket.context("run \"yappr start\" before you create an invitation")?;
     let name = args.name.unwrap_or_else(hostname);
     match pairing_session(&store, ticket, name, args.expires, args.alias).await? {
         PairOutcome::Expired => bail!("the pairing invitation expired"),
@@ -2217,8 +2227,9 @@ async fn run(args: Args) -> Result<()> {
     let common = &args.common;
     match args.command {
         Commands::Post(args) => post(common, args).await,
-        Commands::Serve(args) => serve(common, args).await,
-        Commands::Init(args) => init(common, args).await,
+        Commands::Start(args) => start(common, args, Pairing::First).await,
+        Commands::Init(args) => start(common, args, Pairing::Always).await,
+        Commands::Serve(args) => start(common, args, Pairing::Never).await,
         Commands::On(args) => {
             tokio::select! {
                 res = on(common, args) => res,

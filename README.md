@@ -21,7 +21,7 @@ yappr approve laptop "Deploy to production?" && ./deploy
 
 Open [yappr.run](https://yappr.run/) on your phone or computer to read feeds
 and answer questions. After installing the CLI on your computer, run
-[`yappr init`](#start-with-yappr-init) to pair the browser app.
+[`yappr start`](#start-with-yappr-start) to pair the browser app.
 
 ## Install
 
@@ -29,17 +29,17 @@ and answer questions. After installing the CLI on your computer, run
 cargo install --git https://github.com/fractalops/yappr
 ```
 
-## Start with `yappr init`
+## Start with `yappr start`
 
 Start the feed and pair your first device:
 
 ```sh
-yappr init
+yappr start
 ```
 
-<img src="docs/assets/init.gif" alt="yappr init shows a pairing code, accepts a laptop, and keeps serving the feed" width="800" />
+<img src="docs/assets/start.gif" alt="yappr start shows a pairing code, accepts a laptop, and keeps serving the feed" width="800" />
 
-`init` starts the feed and shows QR and `YAPPR:` pairing codes, valid for five minutes.
+`start` serves the feed. The first time, it shows QR and `YAPPR:` pairing codes, valid for five minutes.
 
 Scan the QR code at [yappr.run](https://yappr.run) on your phone, or join from a laptop:
 
@@ -65,7 +65,7 @@ In a second terminal on the server, post an entry. It appears on the laptop:
 echo "Backup complete" | yappr post --source backup
 ```
 
-Next time, use `yappr serve` to start the server.
+Next time, `yappr start` serves the feed without a new pairing code.
 To pair another device while it runs, use `yappr pair` in a second terminal.
 
 ## Examples

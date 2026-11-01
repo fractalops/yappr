@@ -19,8 +19,7 @@ Commands operate on the selected local feed unless they name a writer.
 
 | Command | Purpose |
 |---|---|
-| `init` | Create the feed and identity if needed, serve, pair one device, then keep serving |
-| `serve [--port PORT]` | Serve the feed to allowed devices |
+| `start [--pair] [--port PORT]` | Serve the feed and deliver it to receiving devices. The first start pairs one device |
 | `post` | Append entries and print their numeric IDs |
 | `read [WRITER...]` | Read entries since the saved position, then exit. Without a writer, read the local feed |
 | `on WRITER -- COMMAND...` | Run a handler for each new matching entry |
@@ -46,7 +45,7 @@ stdout carries command results. Status messages, warnings, and errors go to stde
 | `answer`, `retry` | One JSON decision per successful submission |
 | `read` | Entries |
 | `health`, `status` | Connection health or local state |
-| `init`, `pair` | Pairing code |
+| `start`, `pair` | Pairing code |
 | `join` | Writer's ticket after acceptance |
 | `id`, `ticket`, `network show` | Endpoint ID, ticket, or JSON relay settings |
 | `on` | Handler output |
@@ -67,14 +66,14 @@ yappr post --source ci --kind deploy.finished --subject deploy/web \
   --title "Deployed web" --body "v1.4.2 is live." --data '{"version":"1.4.2"}'
 ```
 
-Without `--body`, `post` reads stdin until EOF and saves one entry. It works without a running `serve` process.
+Without `--body`, `post` reads stdin until EOF and saves one entry. It works without a running `start` process.
 Use `--json` for one entry per JSON input line.
 
 ### Delivery
 
 A device that receives entries, such as the app, gives its address when it pairs. The writer then opens the connection and delivers the feed to that device.
-A running `serve` delivers each new entry. Without `serve`, `post` delivers the new entries itself and waits up to 20 seconds for each device to confirm them.
-If a device does not confirm, the entry stays in the feed, and `post` returns 5. The next delivery from `serve`, `post`, or `retry` sends it.
+A running `start` delivers each new entry. Without `start`, `post` delivers the new entries itself and waits up to 20 seconds for each device to confirm them.
+If a device does not confirm, the entry stays in the feed, and `post` returns 5. The next delivery from `start`, `post`, or `retry` sends it.
 
 ```json
 {"v":1,"id":42,"time":"2026-10-27T09:30:00Z","source":"ci","kind":"deploy.finished","level":"info","subject":"deploy/web","title":"Deployed web","body":"v1.4.2 is live.","data":{"version":"1.4.2"}}
@@ -202,7 +201,7 @@ yappr ask phone "Backup failed. What next?" --choice retry="Retry now" --choice 
 yappr approve phone "Deploy to production?" --timeout 20m
 ```
 
-Both commands create a local question for one allowed responder. A responder that reads the feed needs a running `serve` to read and answer.
+Both commands create a local question for one allowed responder. A responder that reads the feed needs a running `start` to read and answer.
 A responder that receives the feed gets the question from `ask` or `approve` while they wait, and answers on that connection.
 `--to DEVICE` and `--title QUESTION` can replace the positional arguments.
 Both accept `--body`, `--source`, `--level`, `--subject`, `--data`, and `--markdown`.
@@ -235,8 +234,8 @@ Feed records use the `choices` extension with type `question`, `decision`, or `c
 
 ## Pairing and access
 
-`init` serves and pairs one device. `pair` requires a separate running `serve` process.
-Both print a `YAPPR:` pairing code to stdout and a QR code when stderr is a terminal.
+The first `start` pairs one device. `start --pair` pairs a device also when other devices can read the feed.
+`pair` pairs a device while `start` runs in another terminal. Each prints a `YAPPR:` pairing code to stdout and a QR code when stderr is a terminal.
 Codes ignore letter case and contain the writer's ticket, name, token, and deadline.
 
 | Option | Purpose | Default |
@@ -257,7 +256,7 @@ yappr pair --reject DEVICE_ID
 A CLI reader joins with `yappr join CODE --name NAME [--alias NAME]`.
 Here, `--name` names the joining device and `--alias` names the writer locally.
 Acceptance must occur before expiry. The claiming device can retrieve the result for two minutes after the deadline.
-`init` keeps serving after pairing ends, including expiry or rejection.
+`start` keeps serving after pairing ends, including expiry or rejection.
 A device that receives entries, such as the app, gives its address with its request. After acceptance, the writer delivers its feed to that address. See [Delivery](#delivery).
 
 Aliases name devices locally. They do not grant read access.
@@ -318,7 +317,7 @@ yappr network set --defaults
 ```
 
 `network set` saves settings for this feed directory. Global relay flags override them for one command.
-Restart `serve` after changing saved settings. Custom URLs replace this device's home relays. Peers can advertise other relays.
+Restart `start` after changing saved settings. Custom URLs replace this device's home relays. Peers can advertise other relays.
 `--no-relay` requires a reachable direct path. Relays forward encrypted live traffic and cannot read it.
 They do not store entries for offline devices.
 

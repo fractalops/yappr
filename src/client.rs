@@ -45,7 +45,7 @@ impl fmt::Display for Unreachable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "cannot reach the writer {}: {}. Make sure that \"yappr serve\" runs on the writer",
+            "cannot reach the writer {}: {}. Make sure that \"yappr start\" runs on the writer",
             self.writer, self.reason
         )
     }

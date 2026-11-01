@@ -126,7 +126,7 @@ impl Machine {
     }
 }
 
-/// A running `yappr serve`. Kills the process on drop.
+/// A running `yappr start`. Kills the process on drop.
 struct Serve {
     child: Child,
     ticket: String,
@@ -138,7 +138,7 @@ impl Serve {
     }
 
     fn start_with(m: &Machine, args: &[&str]) -> Self {
-        let mut all = vec!["serve"];
+        let mut all = vec!["start"];
         all.extend_from_slice(args);
         let mut child = m
             .command(&all)
@@ -636,7 +636,7 @@ fn init_serves_pairs_one_device_and_keeps_serving() {
     let writer = Machine::new();
     let device = Machine::new();
     let mut init = writer
-        .command(&["init", "--name", "Test writer"])
+        .command(&["start", "--name", "Test writer"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -829,11 +829,13 @@ fn writer_restart_keeps_the_ticket_and_the_feed() {
 
 /// Status and logs go to stderr, so stdout carries only entries.
 #[test]
-fn serve_writes_nothing_to_stdout() {
+fn start_writes_nothing_to_stdout_when_it_does_not_pair() {
     let m = Machine::new();
+    // With an allowed device, start does not pair, so it prints no code.
+    m.run(["allow", &Machine::new().id()]);
     let stdout = tempfile::NamedTempFile::new().unwrap();
     let mut child = m
-        .command(&["serve"])
+        .command(&["start"])
         .env("RUST_LOG", "debug")
         .stdout(stdout.reopen().unwrap())
         .stderr(Stdio::piped())

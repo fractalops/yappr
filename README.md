@@ -91,7 +91,7 @@ fi
 
 `approve` exits with 0 for approval, 7 for rejection, 6 for expiry, or 8 for
 cancellation. The script runs `deploy` after approval. All commands share the
-same [exit codes](docs/scripting.md#exit-codes).
+same [exit codes](docs/reference.md#exit-codes).
 
 ### Choose what a script does next
 
@@ -153,7 +153,7 @@ within five seconds.
 
 ## Reference
 
-The [scripting reference](docs/scripting.md) describes the entry format, exit
+The [CLI reference](docs/reference.md) describes the entry format, exit
 codes, questions, pairing, several writers, relays, and storage.
 
 ## License

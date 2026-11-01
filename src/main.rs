@@ -1934,7 +1934,7 @@ async fn run(args: Args) -> Result<()> {
     }
 }
 
-/// The exit code for an error. docs/scripting.md documents these codes.
+/// The exit code for an error. docs/reference.md documents these codes.
 fn exit_code(err: &anyhow::Error) -> i32 {
     if is_broken_pipe(err) {
         // the reader of stdout left, for example "yappr read ... | head"

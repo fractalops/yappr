@@ -788,7 +788,7 @@ fn store_files_are_private() {
     assert_eq!(mode(&feed.join("secret.key")), 0o600);
 }
 
-// Exit codes are part of the interface. docs/scripting.md documents them.
+// Exit codes are part of the interface. docs/reference.md documents them.
 
 #[test]
 fn exit_2_on_a_usage_error() {

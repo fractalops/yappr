@@ -8,6 +8,7 @@ pub mod control;
 pub mod entry;
 pub mod health;
 pub mod net;
+pub mod open;
 pub mod pairing;
 pub mod proto;
 

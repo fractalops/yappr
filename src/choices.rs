@@ -90,6 +90,35 @@ fn record(entry: &Entry) -> Option<Record> {
         .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
+/// The question that this entry asks.
+pub fn question(entry: &Entry) -> Option<Question> {
+    match record(entry)? {
+        Record::Question { question } => Some(question),
+        _ => None,
+    }
+}
+
+/// The ID of the question that this entry closes with a decision or a
+/// cancellation.
+pub fn closed(entry: &Entry) -> Option<String> {
+    match record(entry)? {
+        Record::Decision { decision } => Some(decision.question_id),
+        Record::Cancelled { question_id } => Some(question_id),
+        Record::Question { .. } => None,
+    }
+}
+
+/// The question ID of the question entry with this entry ID.
+pub fn id_of_entry(entries: &[Entry], id: u64) -> Result<String> {
+    let entry = entries
+        .iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| ChoiceError::new("not_found", &format!("entry #{id} does not exist")))?;
+    Ok(question(entry)
+        .ok_or_else(|| ChoiceError::new("not_found", &format!("entry #{id} is not a question")))?
+        .id)
+}
+
 #[cfg(not(wasm_browser))]
 fn draft(record: Record, title: String, body: String, source: String, kind: &str) -> Result<Draft> {
     let mut extra = serde_json::Map::new();

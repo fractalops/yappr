@@ -110,12 +110,14 @@ enum Commands {
     /// Print the new entries of a feed. With --follow, wait for more.
     ///
     /// Without --since or --tail, read starts after the last entry that it
-    /// printed before, and it saves its position after each entry.
+    /// printed before, and it saves its position after each entry. Without a
+    /// writer, read prints the feed of this machine.
     #[clap(after_help = "Examples:
   yappr read laptop
   yappr read laptop -f
   yappr read laptop server --output json
-  yappr read laptop --since 2h")]
+  yappr read laptop --since 2h
+  yappr read laptop --open")]
     Read(ReadArgs),
 
     /// The same as "read --follow".
@@ -167,7 +169,9 @@ enum Commands {
     #[clap(after_help = "Example:
   yappr approve laptop \"Deploy to production?\" && ./deploy")]
     Approve(ApprovalArgs),
-    /// Read local questions and their current states.
+    /// Print local questions and their states. "read --open" prints the open
+    /// questions.
+    #[clap(hide = true)]
     Questions {
         /// The output format. The default is text for a terminal and one JSON
         /// state per line for a pipe or a file.
@@ -175,18 +179,24 @@ enum Commands {
         output: Option<Format>,
     },
     /// Wait for a local question's final decision.
-    Wait { id: String },
+    Wait {
+        /// The entry ID of the question, such as 42, or its question ID.
+        id: String,
+    },
     /// Cancel a local question.
-    Cancel { id: String },
+    Cancel {
+        /// The entry ID of the question, such as 42, or its question ID.
+        id: String,
+    },
     /// Answer a question from another writer.
     ///
     /// The answer waits in a local outbox until the writer saves it.
-    #[clap(after_help = "Example:\n  yappr answer laptop 3f9a... retry")]
+    #[clap(after_help = "Examples:\n  yappr read laptop --open\n  yappr answer laptop 42 retry")]
     Answer {
         /// The alias, ID, or ticket of the writer that asked.
         #[clap(value_name = "WRITER")]
         ticket: String,
-        /// The question ID.
+        /// The entry ID of the question, such as 42, or its question ID.
         id: String,
         /// The value of the selected choice, such as "approve".
         #[clap(value_name = "VALUE", required_unless_present = "choice")]
@@ -481,8 +491,9 @@ fn parse_interval(s: &str) -> Result<Duration, String> {
 
 #[derive(clap::Args, Debug)]
 struct ReadArgs {
-    /// Writer aliases, endpoint IDs, or feed tickets.
-    #[clap(num_args = 1.., required = true, value_name = "WRITER")]
+    /// Writer aliases, endpoint IDs, or feed tickets. Without a writer, read
+    /// prints the feed of this machine.
+    #[clap(value_name = "WRITER")]
     ticket: Vec<String>,
 
     /// Start after this entry id, or after this time. The time can be a
@@ -521,6 +532,13 @@ struct ReadArgs {
     /// entry for each subject. Entries without a subject all print.
     #[clap(long)]
     latest: bool,
+
+    /// Print only the entries that still need attention: questions with no
+    /// final decision, and subjects whose newest "state" entry is "warn" or
+    /// "alert". From a writer, only the questions that this device can answer.
+    /// The saved position does not move.
+    #[clap(long, conflicts_with_all = ["since", "tail", "latest"])]
+    open: bool,
 
     /// The output format. The default is text for a terminal and JSON for a
     /// pipe or a file.
@@ -1043,9 +1061,95 @@ fn legacy_kinds(args: &mut ReadArgs) {
     }
 }
 
+/// Where `read` gets entries: a writer over iroh, or this machine's feed.
+enum Source {
+    Remote(Follower),
+    Local(LocalFeed),
+}
+
+impl Source {
+    async fn next(&mut self) -> Result<Option<Event>> {
+        match self {
+            Self::Remote(follower) => follower.next().await,
+            Self::Local(feed) => feed.next().await,
+        }
+    }
+
+    fn connection(&self) -> Option<iroh::endpoint::Connection> {
+        match self {
+            Self::Remote(follower) => follower.connection(),
+            Self::Local(_) => None,
+        }
+    }
+}
+
+/// Reads the local feed file with the same request and events as a writer.
+struct LocalFeed {
+    reader: yappr::store::LogReader,
+    req: Request,
+    filter: yappr::proto::Filter,
+    replay: Option<std::collections::VecDeque<Entry>>,
+    head: u64,
+    caught_up: bool,
+}
+
+impl LocalFeed {
+    fn new(store: &Store, req: Request) -> Result<Self> {
+        Ok(Self {
+            reader: store.reader()?,
+            filter: yappr::proto::Filter::new(&req)?,
+            req,
+            replay: None,
+            head: 0,
+            caught_up: false,
+        })
+    }
+
+    fn wanted(&self, entry: &Entry) -> bool {
+        entry.id > self.req.since
+            && self.req.since_time.is_none_or(|t| entry.time >= t)
+            && self.filter.matches(entry)
+    }
+
+    async fn next(&mut self) -> Result<Option<Event>> {
+        if self.replay.is_none() {
+            let mut replay = std::collections::VecDeque::new();
+            while let Some(entry) = self.reader.next_entry()? {
+                self.head = entry.id;
+                if self.wanted(&entry) {
+                    replay.push_back(entry);
+                    if self.req.tail.is_some_and(|n| replay.len() as u64 > n) {
+                        replay.pop_front();
+                    }
+                }
+            }
+            self.replay = Some(replay);
+        }
+        if let Some(entry) = self.replay.as_mut().and_then(|r| r.pop_front()) {
+            return Ok(Some(Event::Entry(entry)));
+        }
+        if !self.caught_up {
+            self.caught_up = true;
+            return Ok(Some(Event::CaughtUp { head: self.head }));
+        }
+        if !self.req.follow {
+            return Ok(None);
+        }
+        loop {
+            while let Some(entry) = self.reader.next_entry()? {
+                if self.wanted(&entry) {
+                    return Ok(Some(Event::Entry(entry)));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
 async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
     legacy_kinds(&mut args);
     let dir = common.dir()?;
+    let secret = common.secret()?;
     let mut targets = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for target in &args.ticket {
@@ -1058,9 +1162,15 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
         } else {
             addr.id.to_string()
         };
-        targets.push((label, addr));
+        targets.push((label, Some(addr)));
     }
-    let endpoint = net::bind(common.secret()?, common.net(None)?, vec![], None).await?;
+    if targets.is_empty() {
+        targets.push(("local".into(), None));
+    }
+    let endpoint = match targets[0].1 {
+        Some(_) => Some(net::bind(secret.clone(), common.net(None)?, vec![], None).await?),
+        None => None,
+    };
     let multiple = targets.len() > 1;
     let output = Output::resolve(args.output, io::stdout().is_terminal());
     let renderer = Renderer::new(
@@ -1073,10 +1183,11 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
             ),
         TimeZone::system(),
     );
+    let follow = args.follow && !args.no_follow;
     let mut tasks = tokio::task::JoinSet::new();
     for (label, addr) in targets {
         let mut req = Request {
-            follow: args.follow && !args.no_follow,
+            follow,
             tail: args.tail,
             kind_patterns: args.kind.clone(),
             not_kind_patterns: args.not_kind.clone(),
@@ -1085,7 +1196,19 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
             source: args.source.as_ref().map(|re| re.as_str().to_string()),
             ..Default::default()
         };
+        let filter = yappr::proto::Filter::new(&req)?;
+        let feed = addr.as_ref().map_or(secret.public(), |addr| addr.id);
         let cursor = match args.since {
+            _ if args.open => {
+                // The writer sends every entry that can open or close an
+                // entry. The filters apply to the open entries.
+                req = Request {
+                    follow,
+                    kind_patterns: yappr::open::KINDS.map(String::from).to_vec(),
+                    ..Default::default()
+                };
+                None
+            }
             Some(Since::Id(id)) => {
                 req.since = id;
                 None
@@ -1096,31 +1219,47 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
             }
             None if args.tail.is_some() => None,
             None => {
-                let cursor = Cursor::new(&dir, addr.id, &args.cursor)?;
+                let cursor = Cursor::new(&dir, feed, &args.cursor)?;
                 req.since = cursor.load()?;
                 Some(cursor)
             }
         };
         let printer = Printer {
             cursor,
-            filter: yappr::proto::Filter::new(&req)?,
+            filter,
             writer: multiple.then(|| label.clone()),
             renderer: renderer.clone(),
         };
-        let status = args.follow && !args.no_follow && io::stderr().is_terminal();
+        let status = follow && addr.is_some() && io::stderr().is_terminal();
         let latest = args.latest;
-        let mut follower = Follower::new(endpoint.clone(), addr, req);
+        // On the local feed, the open questions are the questions that this
+        // machine asked. On a writer, they are the questions for this device.
+        let mut open = args
+            .open
+            .then(|| yappr::open::Open::new(addr.as_ref().map(|_| secret.public())));
+        let mut source = match (&endpoint, addr) {
+            (Some(endpoint), Some(addr)) => {
+                Source::Remote(Follower::new(endpoint.clone(), addr, req))
+            }
+            _ => Source::Local(LocalFeed::new(&common.store()?, req)?),
+        };
         tasks.spawn(async move {
             let mut caught_up = false;
+            let mut replayed = false;
             // With --latest, the replay waits here until it is complete.
             let mut replay: Option<Vec<Entry>> = latest.then(Vec::new);
             let result = async {
-                while let Some(event) = follower.next().await? {
+                while let Some(event) = source.next().await? {
                     match event {
-                        Event::Entry(entry) => match &mut replay {
-                            Some(replay) if printer.wants(&entry) => replay.push(entry),
-                            Some(_) => {}
-                            None => printer.print(&entry)?,
+                        Event::Entry(entry) => match (&mut open, &mut replay) {
+                            (Some(open), _) => {
+                                if open.push(&entry) && replayed {
+                                    printer.print(&entry)?;
+                                }
+                            }
+                            (None, Some(replay)) if printer.wants(&entry) => replay.push(entry),
+                            (None, Some(_)) => {}
+                            (None, None) => printer.print(&entry)?,
                         },
                         Event::CaughtUp { head } => {
                             if let Some(replay) = replay.take() {
@@ -1128,10 +1267,16 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
                                     printer.print(&entry)?;
                                 }
                             }
+                            if let Some(open) = open.as_ref().filter(|_| !replayed) {
+                                for entry in open.entries() {
+                                    printer.print(entry)?;
+                                }
+                            }
+                            replayed = true;
                             printer.passed(head)?;
                             if status && !caught_up {
                                 let health =
-                                    follower.connection().map(|c| yappr::health::snapshot(&c));
+                                    source.connection().map(|c| yappr::health::snapshot(&c));
                                 let route = health
                                     .as_ref()
                                     .and_then(|h| h.route.as_deref())
@@ -1161,7 +1306,9 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
         if let Err(error) = result {
             if is_broken_pipe(&error) {
                 tasks.abort_all();
-                endpoint.close().await;
+                if let Some(endpoint) = &endpoint {
+                    endpoint.close().await;
+                }
                 return Err(error);
             }
             if multiple {
@@ -1170,7 +1317,9 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
             failure = Some(error);
         }
     }
-    endpoint.close().await;
+    if let Some(endpoint) = &endpoint {
+        endpoint.close().await;
+    }
     failure.map_or(Ok(()), Err)
 }
 
@@ -1508,6 +1657,56 @@ fn finish(state: choices::QuestionState) -> Option<Result<()>> {
         "cancelled" => outcome(8, "the question was cancelled"),
         _ => None,
     }
+}
+
+/// The question ID of a local question, given as an entry ID or a question ID.
+fn local_question(common: &CommonArgs, id: String) -> Result<String> {
+    match id.parse() {
+        Ok(entry) => choices::id_of_entry(&common.store()?.entries()?, entry),
+        Err(_) => Ok(id),
+    }
+}
+
+/// The question ID of a writer's question, given as an entry ID or a question
+/// ID. An entry ID needs the writer's question entry.
+async fn remote_question(
+    common: &CommonArgs,
+    ticket: &EndpointTicket,
+    id: String,
+) -> Result<String> {
+    let Ok(entry_id) = id.parse::<u64>() else {
+        return Ok(id);
+    };
+    let req = Request {
+        since: entry_id.saturating_sub(1),
+        limit: Some(1),
+        kind_patterns: vec!["question".into()],
+        ..Default::default()
+    };
+    let endpoint = net::bind(common.secret()?, common.net(None)?, vec![], None).await?;
+    let mut follower = Follower::new(endpoint.clone(), ticket.endpoint_addr().clone(), req);
+    let result = async {
+        while let Some(event) = follower.next().await? {
+            if let Event::Entry(entry) = event {
+                if entry.id == entry_id {
+                    if let Some(question) = choices::question(&entry) {
+                        return Ok(question.id);
+                    }
+                }
+                break;
+            }
+            if let Event::CaughtUp { .. } = event {
+                break;
+            }
+        }
+        Err(
+            choices::ChoiceError::new("not_found", &format!("entry #{entry_id} is not a question"))
+                .into(),
+        )
+    }
+    .await;
+    endpoint.close().await;
+    result
 }
 
 async fn answer(
@@ -1876,8 +2075,8 @@ async fn run(args: Args) -> Result<()> {
             }
             Ok(())
         }
-        Commands::Wait { id } => wait(common, &id).await,
-        Commands::Cancel { id } => choices::cancel(&common.store()?, &id),
+        Commands::Wait { id } => wait(common, &local_question(common, id)?).await,
+        Commands::Cancel { id } => choices::cancel(&common.store()?, &local_question(common, id)?),
         Commands::Devices => devices(common),
         Commands::Status { output } => status(common, Format::is_text(output)),
         Commands::Answer {
@@ -1887,6 +2086,7 @@ async fn run(args: Args) -> Result<()> {
             choice,
         } => {
             let ticket = EndpointTicket::new(peers::resolve(&common.dir()?, &ticket)?);
+            let id = remote_question(common, &ticket, id).await?;
             let value = value.or(choice).context("give the value of a choice")?;
             answer(common, ticket, id, value).await
         }

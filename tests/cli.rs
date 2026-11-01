@@ -560,6 +560,78 @@ fn a_question_entry_keeps_its_subject_and_data() {
 }
 
 #[test]
+fn read_without_a_writer_prints_the_local_feed() {
+    let m = Machine::new();
+    let first = m.post("one", &[]);
+    let second = m.post("two", &[]);
+    assert_eq!(json_ids(&m.run(["read"])), [first, second]);
+    assert!(m.run(["read"]).is_empty());
+    assert_eq!(json_ids(&m.run(["read", "--tail", "1"])), [second]);
+}
+
+#[test]
+fn open_prints_unanswered_questions_and_bad_states_then_answer_takes_the_entry_id() {
+    let (writer, reader) = pair();
+    let serve = Serve::start(&writer);
+    writer.post(
+        "3h",
+        &[
+            "--kind",
+            "state",
+            "--subject",
+            "backup/nas",
+            "--level",
+            "warn",
+        ],
+    );
+    let full = writer.post(
+        "95%",
+        &[
+            "--kind",
+            "state",
+            "--subject",
+            "disk/root",
+            "--level",
+            "alert",
+        ],
+    );
+    writer.post("ok", &["--kind", "state", "--subject", "backup/nas"]);
+    writer.post("event", &["--level", "alert"]);
+    let other = Machine::new();
+    writer.run(["allow", &other.id()]);
+    writer.run([
+        "ask",
+        &other.id(),
+        "Not for the reader",
+        "--choice",
+        "a",
+        "--choice",
+        "b",
+        "--no-wait",
+    ]);
+    let question = writer.run(["approve", &reader.id(), "Deploy?", "--no-wait"]);
+    let entry = full + 4;
+
+    let open = reader.run(["read", &serve.ticket, "--open"]);
+    assert_eq!(json_ids(&open), [full, entry]);
+    let questions = reader.run(["read", &serve.ticket, "--open", "--kind", "question"]);
+    assert_eq!(json_ids(&questions), [entry]);
+
+    reader.run(["answer", &serve.ticket, &entry.to_string(), "approve"]);
+    assert_eq!(writer.run(["wait", question.trim()]), "approve\n");
+    assert_eq!(
+        json_ids(&reader.run(["read", &serve.ticket, "--open"])),
+        [full]
+    );
+
+    let (_, stderr) = reader.fail(["answer", &serve.ticket, &full.to_string(), "approve"]);
+    assert!(
+        stderr.contains(&format!("entry #{full} is not a question")),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn init_serves_pairs_one_device_and_keeps_serving() {
     let writer = Machine::new();
     let device = Machine::new();
@@ -793,7 +865,7 @@ fn store_files_are_private() {
 #[test]
 fn exit_2_on_a_usage_error() {
     let m = Machine::new();
-    assert_eq!(m.exit(["read"], b"").0, 2);
+    assert_eq!(m.exit(["read", "--open", "--tail", "1"], b"").0, 2);
     assert_eq!(m.exit(["post", "--no-such-option"], b"").0, 2);
 }
 

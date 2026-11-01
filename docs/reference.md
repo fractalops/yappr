@@ -22,11 +22,11 @@ Commands operate on the selected local feed unless they name a writer.
 | `init` | Create the feed and identity if needed, serve, pair one device, then keep serving |
 | `serve [--port PORT]` | Serve the feed to allowed devices |
 | `post` | Append entries and print their numeric IDs |
-| `read WRITER...` | Read entries since the saved position, then exit |
+| `read [WRITER...]` | Read entries since the saved position, then exit. Without a writer, read the local feed |
 | `on WRITER -- COMMAND...` | Run a handler for each new matching entry |
 | `ask DEVICE QUESTION --choice VALUE...` | Create a question and wait for a choice |
 | `approve DEVICE QUESTION` | Create an approval request and wait for a decision |
-| `questions`, `wait ID`, `cancel ID` | List local questions, wait for a result, or cancel a pending question |
+| `wait ID`, `cancel ID` | Wait for the result of a local question, or cancel it |
 | `answer WRITER ID VALUE`, `retry` | Submit an answer, or resend queued submissions |
 | `pair`, `join CODE` | Invite a device, or request access with a pairing code |
 | `allow DEVICE`, `deny DEVICE` | Grant or revoke read access |
@@ -45,13 +45,13 @@ stdout carries command results. Status messages, warnings, and errors go to stde
 | `ask`, `approve`, `wait` | Selected value, or question ID with `--no-wait` on creation |
 | `answer`, `retry` | One JSON decision per successful submission |
 | `read` | Entries |
-| `questions`, `health`, `status` | Question states, connection health, or local state |
+| `health`, `status` | Connection health or local state |
 | `init`, `pair` | Pairing code |
 | `join` | Writer's ticket after acceptance |
 | `id`, `ticket`, `network show` | Endpoint ID, ticket, or JSON relay settings |
 | `on` | Handler output |
 
-`read`, `questions`, `health`, and `status` default to text on a terminal and JSON in a pipe or file.
+`read`, `health`, and `status` default to text on a terminal and JSON in a pipe or file.
 Use `--output json` in scripts. Text layouts can change between versions.
 JSON output uses one object per line. `status` prints one object with `endpoint`, `feed`, `peers`, `questions`, and `outbox`.
 Its `questions` field counts questions by status.
@@ -136,6 +136,7 @@ yappr read laptop --since 0 --kind 'deploy.*' --level warn
 | `--subject PATTERN` | Include matching subjects |
 | `--source REGEX` | Include matching sources |
 | `--latest` | Replay only the newest matching entry per subject |
+| `--open` | Print only the entries that still need attention |
 
 Kind and subject patterns support `*` for any text. Other characters are literal. Different filters apply together.
 `--latest` retains every entry without a subject. With `-f`, all later matching entries print as they arrive.
@@ -147,6 +148,16 @@ The writer filters entries before transmission.
 
 Several writers share one endpoint. One failed writer does not stop the others.
 Entries print in arrival order across writers.
+Without a writer, `read` prints the local feed, with its own saved positions.
+
+`--open` replays the feed and keeps the entries that still need attention:
+
+- Questions with no final decision. From a writer, only the questions that this device can answer. On the local feed, all questions that this machine asked.
+- For each subject, the newest `state` entry, if its level is `warn` or `alert`. A newer `state` entry at `info` closes it.
+
+The other filters apply to these entries. `--open` does not move the saved position.
+With `-f`, entries that become open print as they arrive. An entry that closes later does not print again.
+
 `health WRITER` reports identity, connection state, route, address, and round-trip time without moving a cursor.
 
 ## Handlers
@@ -195,7 +206,9 @@ id=$(yappr approve phone "Deploy to production?" --no-wait)
 yappr wait "$id"
 ```
 
-On the responder, use `yappr answer WRITER ID VALUE`.
+On the responder, `yappr read WRITER --open` lists the open questions. Answer with `yappr answer WRITER ID VALUE`.
+`answer`, `wait`, and `cancel` accept the entry ID of the question, such as `42`, or its question ID.
+`answer` with an entry ID needs the writer to look up the question. With a question ID, it saves the answer when the writer is offline.
 It saves the submission locally before contacting the writer. A transport failure returns 5 and leaves the submission queued.
 `retry` resends queued submissions.
 
@@ -203,8 +216,6 @@ The writer accepts one final decision. Repeating the same submission returns the
 A different submission cannot replace it. The writer rejects expired or cancelled questions, invalid values, and unauthorized responders.
 Ctrl-C during `ask` or `approve` attempts cancellation. An already final decision determines the result.
 
-`questions --output json` prints states with `question`, `status`, and `decision` fields.
-Statuses are `pending`, `answered`, `expired`, or `cancelled`.
 Feed records use the `choices` extension with type `question`, `decision`, or `cancelled`.
 
 ## Pairing and access

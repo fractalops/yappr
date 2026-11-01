@@ -179,7 +179,7 @@ impl Renderer {
         let title = entry.title.as_deref().filter(|t| !t.is_empty());
         let body = entry.body.strip_suffix('\n').unwrap_or(&entry.body);
         match title {
-            None if !body.is_empty() && !body.contains('\n') => writeln!(w, "  {body}"),
+            None if !body.is_empty() && !body.contains('\n') => writeln!(w, "  {body}")?,
             _ => {
                 if let Some(title) = title {
                     write!(w, " {}", self.paint("1", title))?;
@@ -188,9 +188,18 @@ impl Renderer {
                 for line in entry.body.lines() {
                     writeln!(w, "  {line}")?;
                 }
-                Ok(())
             }
         }
+        if let Some(question) = crate::choices::question(entry) {
+            let values: Vec<&str> = question.options.iter().map(|o| o.value.as_str()).collect();
+            write!(w, "  {} {}", self.paint("2", "choices:"), values.join(", "))?;
+            if let Some(deadline) = question.expires_at {
+                let until = deadline.to_zoned(self.tz.clone()).strftime("%H:%M:%S");
+                write!(w, " {}", self.paint("2", &format!("(until {until})")))?;
+            }
+            writeln!(w)?;
+        }
+        Ok(())
     }
 
     fn paint(&self, sgr: &str, text: &str) -> String {

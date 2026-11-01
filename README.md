@@ -111,17 +111,17 @@ The script stops on expiry, cancellation, or error.
 ### Answer a question
 
 In the browser app, select a choice on the question.
-On the laptop, use the CLI to find the question ID:
+On the laptop, list what still needs your attention: questions for you, and
+subjects whose newest state is a warning or an alert.
 
 ```sh
-yappr read server --since 0 --output json \
-  | jq -r 'select(.kind == "question") | "\(.choices.question.id)  \(.title)"'
+yappr read server --open
 ```
 
-Replace `QUESTION_ID` with an ID from the output. For an approval, answer with:
+Answer a question with its entry number and a choice, such as:
 
 ```sh
-yappr answer server QUESTION_ID approve
+yappr answer server 42 approve
 ```
 
 Yappr saves your answer locally before sending it.

@@ -642,8 +642,9 @@ impl CommonArgs {
         Ok(base.join("yappr").join(&self.feed))
     }
 
+    /// The feed of this machine. It signs new entries with this machine's key.
     fn store(&self) -> Result<Store> {
-        Store::open(self.dir()?)
+        Ok(Store::open(self.dir()?)?.signed_by(self.secret()?))
     }
 
     fn net(&self, port: Option<u16>) -> Result<NetOptions> {
@@ -888,7 +889,9 @@ async fn on(common: &CommonArgs, args: OnArgs) -> Result<()> {
         ..Default::default()
     };
     if cursor.exists() {
-        req.since = cursor.load()?;
+        let position = cursor.load()?;
+        req.since = position.id;
+        req.log = position.log;
     } else {
         // A new handler runs for new entries only, not for the history.
         req.tail = Some(0);
@@ -910,13 +913,17 @@ async fn on(common: &CommonArgs, args: OnArgs) -> Result<()> {
                             eprintln!("entry #{}: {error:#}. Skipped.", entry.id);
                         }
                     }
-                    cursor.save(entry.id)?;
+                    cursor.save(entry.id, follower.log())?;
                 }
                 Event::CaughtUp { head } => {
                     // Also save 0, so that the next start does not run the
                     // entries that arrive in between as history.
-                    if !cursor.exists() || head > cursor.load()? {
-                        cursor.save(head)?;
+                    let saved = cursor.load()?;
+                    if !cursor.exists()
+                        || head > saved.id
+                        || saved.log.as_deref() != follower.log()
+                    {
+                        cursor.save(head, follower.log())?;
                     }
                 }
                 Event::Retrying { delay, error } => {
@@ -1000,19 +1007,21 @@ impl Printer {
         self.filter.matches(entry)
     }
 
-    /// Move the cursor to `head`. The writer checked every entry up to there,
-    /// also the entries that the filter left out. The cursor never moves back.
-    fn passed(&self, head: u64) -> Result<()> {
+    /// Move the cursor to `head` of the log `log`. The writer checked every
+    /// entry up to there, also the entries that the filter left out. In one
+    /// log, the cursor never moves back.
+    fn passed(&self, head: u64, log: Option<&str>) -> Result<()> {
         if let Some(cursor) = &self.cursor {
-            if head > cursor.load()? {
-                cursor.save(head)?;
+            let saved = cursor.load()?;
+            if head > saved.id || saved.log.as_deref() != log {
+                cursor.save(head, log)?;
             }
         }
         Ok(())
     }
 
-    /// Print one entry, then move the cursor past it.
-    fn print(&self, entry: &Entry) -> Result<()> {
+    /// Print one entry of the log `log`, then move the cursor past it.
+    fn print(&self, entry: &Entry, log: Option<&str>) -> Result<()> {
         if self.wants(entry) {
             let mut buf = Vec::new();
             if let Some(writer) = &self.writer {
@@ -1034,7 +1043,7 @@ impl Printer {
             stdout.flush()?;
         }
         if let Some(cursor) = &self.cursor {
-            cursor.save(entry.id)?;
+            cursor.save(entry.id, log)?;
         }
         Ok(())
     }
@@ -1081,11 +1090,21 @@ impl Source {
             Self::Local(_) => None,
         }
     }
+
+    /// The name of the feed's log, after the source knows it.
+    fn log(&self) -> Option<&str> {
+        match self {
+            Self::Remote(follower) => follower.log(),
+            Self::Local(feed) => feed.log.as_deref(),
+        }
+    }
 }
 
 /// Reads the local feed file with the same request and events as a writer.
 struct LocalFeed {
     reader: yappr::store::LogReader,
+    /// The name of the log: the time of the first entry.
+    log: Option<String>,
     req: Request,
     filter: yappr::proto::Filter,
     replay: Option<std::collections::VecDeque<Entry>>,
@@ -1094,9 +1113,15 @@ struct LocalFeed {
 }
 
 impl LocalFeed {
-    fn new(store: &Store, req: Request) -> Result<Self> {
+    fn new(store: &Store, mut req: Request) -> Result<Self> {
+        let log = store.log()?;
+        // A position in another log does not apply to this log.
+        if req.log.is_some() && req.log != log {
+            req.since = 0;
+        }
         Ok(Self {
             reader: store.reader()?,
+            log,
             filter: yappr::proto::Filter::new(&req)?,
             req,
             replay: None,
@@ -1116,6 +1141,7 @@ impl LocalFeed {
             let mut replay = std::collections::VecDeque::new();
             while let Some(entry) = self.reader.next_entry()? {
                 self.head = entry.id;
+                self.log.get_or_insert_with(|| entry.time.to_string());
                 if self.wanted(&entry) {
                     replay.push_back(entry);
                     if self.req.tail.is_some_and(|n| replay.len() as u64 > n) {
@@ -1137,6 +1163,7 @@ impl LocalFeed {
         }
         loop {
             while let Some(entry) = self.reader.next_entry()? {
+                self.log.get_or_insert_with(|| entry.time.to_string());
                 if self.wanted(&entry) {
                     return Ok(Some(Event::Entry(entry)));
                 }
@@ -1220,7 +1247,9 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
             None if args.tail.is_some() => None,
             None => {
                 let cursor = Cursor::new(&dir, feed, &args.cursor)?;
-                req.since = cursor.load()?;
+                let position = cursor.load()?;
+                req.since = position.id;
+                req.log = position.log;
                 Some(cursor)
             }
         };
@@ -1254,26 +1283,26 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
                         Event::Entry(entry) => match (&mut open, &mut replay) {
                             (Some(open), _) => {
                                 if open.push(&entry) && replayed {
-                                    printer.print(&entry)?;
+                                    printer.print(&entry, source.log())?;
                                 }
                             }
                             (None, Some(replay)) if printer.wants(&entry) => replay.push(entry),
                             (None, Some(_)) => {}
-                            (None, None) => printer.print(&entry)?,
+                            (None, None) => printer.print(&entry, source.log())?,
                         },
                         Event::CaughtUp { head } => {
                             if let Some(replay) = replay.take() {
                                 for entry in newest_for_each_subject(replay) {
-                                    printer.print(&entry)?;
+                                    printer.print(&entry, source.log())?;
                                 }
                             }
                             if let Some(open) = open.as_ref().filter(|_| !replayed) {
                                 for entry in open.entries() {
-                                    printer.print(entry)?;
+                                    printer.print(entry, source.log())?;
                                 }
                             }
                             replayed = true;
-                            printer.passed(head)?;
+                            printer.passed(head, source.log())?;
                             if status && !caught_up {
                                 let health =
                                     source.connection().map(|c| yappr::health::snapshot(&c));

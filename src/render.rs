@@ -228,6 +228,7 @@ mod tests {
             data: None,
             title: Some("disk usage".into()),
             body: "Filesystem  Size\n/dev/sda1   100G\n".into(),
+            sig: None,
             extra: Default::default(),
         }
     }

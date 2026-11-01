@@ -14,7 +14,7 @@ use n0_future::time::{Duration, Instant};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-pub const ALPN: &[u8] = b"choices/0";
+pub const ALPN: &[u8] = b"yappr/choices/1";
 const MAX_CONTROL: usize = 16 * 1024;
 const IDLE: Duration = Duration::from_secs(60);
 const MAX_CONNECTIONS: usize = 64;

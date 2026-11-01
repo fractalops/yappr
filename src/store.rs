@@ -5,13 +5,18 @@
 //! line and then calls fsync. A crash can leave a partial last line. Readers
 //! never return a line that does not end in a newline, and the next append
 //! removes the partial line.
+//!
+//! The name of a log is the time of its first entry. A log that starts again
+//! after a reset has a new name, so a reader knows that its position in the
+//! old log does not apply.
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use iroh::SecretKey;
 use jiff::Timestamp;
 
 use crate::{
@@ -26,6 +31,9 @@ const LOCK: &str = "feed.lock";
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
+    /// The key that signs new entries. Without it, new entries have no
+    /// signature.
+    signer: Option<SecretKey>,
 }
 
 impl Store {
@@ -33,9 +41,15 @@ impl Store {
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         create_private_dir(&dir)?;
-        let store = Self { dir };
+        let store = Self { dir, signer: None };
         store.open_log()?;
         Ok(store)
+    }
+
+    /// Sign each new entry with `secret`, the identity of the writer.
+    pub fn signed_by(mut self, secret: SecretKey) -> Self {
+        self.signer = Some(secret);
+        self
     }
 
     /// The feed directory.
@@ -88,7 +102,11 @@ impl Store {
             Some(line) => parse(&line)?.id,
             None => 0,
         };
-        let entry = Entry {
+        let first = match last_id {
+            0 => None,
+            _ => self.reader()?.next_entry()?,
+        };
+        let mut entry = Entry {
             v: entry::SCHEMA_VERSION,
             id: last_id + 1,
             time: Timestamp::now(),
@@ -100,8 +118,25 @@ impl Store {
             body: draft.body,
             format: draft.format,
             data: draft.data,
+            sig: None,
             extra: draft.extra,
         };
+        if let Some(secret) = &self.signer {
+            let log = match &first {
+                Some(first) => {
+                    let log = first.time.to_string();
+                    if first.verify(&secret.public(), &log).is_err() {
+                        bail!(
+                            "the feed in {} belongs to another identity. Use its secret key",
+                            self.dir.display()
+                        );
+                    }
+                    log
+                }
+                None => entry.time.to_string(),
+            };
+            entry.sign(secret, &log);
+        }
         let mut line = serde_json::to_vec(&entry)?;
         if line.len() > entry::MAX_ENTRY {
             return Err(entry::Invalid::TooLong {
@@ -136,6 +171,12 @@ impl Store {
             Some(line) => Ok(parse(&line)?.id),
             None => Ok(0),
         }
+    }
+
+    /// The name of the log: the time of its first entry. An empty log has no
+    /// name.
+    pub fn log(&self) -> Result<Option<String>> {
+        Ok(self.reader()?.next_entry()?.map(|e| e.time.to_string()))
     }
 
     /// A reader that starts at the first entry.
@@ -420,6 +461,41 @@ mod tests {
         assert_eq!(store.append(draft("b")).unwrap().id, 2);
         let bodies: Vec<String> = all(&store).into_iter().map(|e| e.body).collect();
         assert_eq!(bodies, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_signed_store_signs_each_entry_for_its_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = SecretKey::generate();
+        let store = Store::open(dir.path()).unwrap().signed_by(secret.clone());
+        assert_eq!(store.log().unwrap(), None);
+        let first = store.append(draft("a")).unwrap();
+        let second = store.append(draft("b")).unwrap();
+        let log = store.log().unwrap().unwrap();
+        assert_eq!(log, first.time.to_string());
+        for entry in all(&store) {
+            assert_eq!(entry.verify(&secret.public(), &log), Ok(true));
+        }
+        assert_eq!(all(&store), [first, second]);
+
+        let other = Store::open(dir.path())
+            .unwrap()
+            .signed_by(SecretKey::generate());
+        let err = other.append(draft("c")).unwrap_err();
+        assert!(err.to_string().contains("another identity"), "{err:#}");
+        Store::open(dir.path()).unwrap().append(draft("d")).unwrap();
+    }
+
+    #[test]
+    fn a_new_log_has_a_new_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.append(draft("a")).unwrap();
+        let old = store.log().unwrap();
+        fs::remove_file(dir.path().join(LOG)).unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.append(draft("b")).unwrap();
+        assert_ne!(store.log().unwrap(), old);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The serve side of the `feed/0` protocol.
+//! The serve side of the `yappr/feed/1` protocol.
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
@@ -245,8 +245,15 @@ impl FeedProtocol {
             pending: VecDeque::new(),
         };
         let filter = proto::Filter::new(&req)?;
+        let mut log = self.store.log()?;
+        proto::write_frame(send, &Frame::Feed { log: log.clone() }, proto::MAX_FRAME).await?;
+        // A position in another log does not apply to this log.
+        let since = match &req.log {
+            Some(theirs) if Some(theirs) != log.as_ref() => 0,
+            _ => req.since,
+        };
         let wanted = |e: &Entry| {
-            e.id > req.since && req.since_time.is_none_or(|t| e.time >= t) && filter.matches(e)
+            e.id > since && req.since_time.is_none_or(|t| e.time >= t) && filter.matches(e)
         };
         let mut budget = req.limit.unwrap_or(u64::MAX);
 
@@ -296,6 +303,11 @@ impl FeedProtocol {
                 return Err(Revoked.into());
             }
             head = *head_rx.borrow_and_update();
+            if log.is_none() {
+                log = self.store.log()?;
+                proto::write_frame(send, &Frame::Feed { log: log.clone() }, proto::MAX_FRAME)
+                    .await?;
+            }
             while let Some(entry) = cursor.next_upto(head).await? {
                 if wanted(&entry) && !send_entry(send, entry, &mut budget).await? {
                     return Ok(());

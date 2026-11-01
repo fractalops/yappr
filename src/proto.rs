@@ -1,8 +1,9 @@
-//! The wire format of the `feed/0` protocol.
+//! The wire format of the `yappr/feed/1` protocol.
 //!
 //! The follower opens one bidirectional stream and sends one [`Request`].
-//! The server sends [`Frame`]s until the request is complete. Each frame is a
-//! u32 big-endian length, then that many bytes of JSON.
+//! The server sends [`Frame::Feed`] and then the entries until the request is
+//! complete. Each frame is a u32 big-endian length, then that many bytes of
+//! JSON.
 use anyhow::{bail, Context, Result};
 use jiff::Timestamp;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -41,6 +42,10 @@ pub struct Request {
     /// Send entries with an id greater than this.
     #[serde(default)]
     pub since: u64,
+    /// The log that `since` belongs to. If the writer's log has another name,
+    /// the writer starts at the first entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
     /// Skip entries older than this time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_time: Option<Timestamp>,
@@ -177,6 +182,7 @@ impl Default for Request {
     fn default() -> Self {
         Self {
             since: 0,
+            log: None,
             since_time: None,
             tail: None,
             limit: None,
@@ -198,6 +204,9 @@ impl Default for Request {
 // Almost every value is an entry, so a box would save no memory.
 #[allow(clippy::large_enum_variant)]
 pub enum Frame {
+    /// The name of the writer's log, see [`crate::store`]. It comes first,
+    /// and again when an empty log gets its first entry.
+    Feed { log: Option<String> },
     /// One feed entry.
     Entry { entry: Entry },
     /// The replay is complete. `head` is the id of the last entry in the feed.
@@ -345,6 +354,7 @@ mod tests {
             data: None,
             title: None,
             body: "x".into(),
+            sig: None,
             extra: Default::default(),
         };
         let all = Filter::new(&Request::default()).unwrap();
@@ -381,6 +391,7 @@ mod tests {
             data: None,
             title: None,
             body: "x".into(),
+            sig: None,
             extra: Default::default(),
         };
         let filter = |req: Request| Filter::new(&req).unwrap();

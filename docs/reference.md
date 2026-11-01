@@ -90,6 +90,7 @@ Limits count UTF-8 bytes. An entry needs a title, body, or both. The complete JS
 | `body` | string | At most 256 KiB. Only newline and tab may be control characters |
 | `format` | string | Optional: `text` or `markdown`. Default: `text` |
 | `data` | object | Optional: JSON object, at most 64 KiB when serialized |
+| `sig` | string | Writer's Ed25519 signature, hex. Entries from older versions have none |
 
 `event` records an occurrence. `state` records the current state of a subject.
 The app shows the newest `state` per subject per writer. The log retains all entries.
@@ -102,7 +103,7 @@ The CLI prints Markdown source. Bodies cannot contain terminal escape codes. Dis
 ### JSON input
 
 `post --json` accepts the fields above and preserves unknown fields. Missing or null input fields use the command's defaults.
-The writer assigns `v`, `id`, and `time`, ignoring input values for those fields.
+The writer assigns `v`, `id`, `time`, and `sig`, ignoring input values for those fields.
 It also accepts the multi-writer envelope and extracts `entry`.
 
 ```sh
@@ -116,6 +117,12 @@ An invalid input line produces an error on stderr. Processing continues, and the
 
 Optional fields retain the current `v`. Removing a field or changing its meaning increments `v`.
 Readers should ignore unknown fields. `read` preserves them in JSON and stops at an unsupported schema version.
+
+### Signatures
+
+The writer signs each new entry with its identity key. The signature covers the bytes `yappr/entry/1`, a zero byte, the log name, a zero byte, and the entry without `sig` as JSON with sorted keys and no spaces.
+The log name is the `time` of the log's first entry. A reader stops at an entry with a signature that does not match.
+A feed belongs to the identity that signed its first entry. `post` with another identity fails.
 
 ## Reading
 
@@ -144,6 +151,7 @@ Kind and subject patterns support `*` for any text. Other characters are literal
 Each writer has a separate cursor. `read` saves its position after printing an entry.
 After replay, the cursor also advances past entries excluded by filters. Changing filters does not restore those entries.
 `--since` and `--tail` leave the saved cursor unchanged. Use `--since 0` to replay the full history.
+If the writer's feed starts again with a new log, `read` starts at its first entry.
 The writer filters entries before transmission.
 
 Several writers share one endpoint. One failed writer does not stop the others.

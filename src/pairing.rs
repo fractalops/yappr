@@ -12,7 +12,7 @@ use crate::EndpointTicket;
 use crate::{disk, store::Store};
 use iroh_tickets::Ticket;
 
-pub const ALPN: &[u8] = b"pair/0";
+pub const ALPN: &[u8] = b"yappr/pair/1";
 
 /// How long after the deadline the device that claimed an invitation can read
 /// its result. New claims and confirmations still end at the deadline.

@@ -38,8 +38,10 @@ struct Writer {
 impl Writer {
     async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("feed")).unwrap();
         let secret = SecretKey::generate();
+        let store = Store::open(dir.path().join("feed"))
+            .unwrap()
+            .signed_by(secret.clone());
         let server = Server::spawn(store.clone(), secret.clone(), Network::Local)
             .await
             .unwrap();
@@ -102,6 +104,14 @@ async fn drain(mut sub: Subscription) -> Vec<Frame> {
         out.push(frame);
     }
     out
+}
+
+/// Read the first frame, the name of the writer's log.
+async fn log(sub: &mut Subscription) -> Option<String> {
+    match timeout(WAIT, sub.next()).await.expect("timed out").unwrap() {
+        Some(Frame::Feed { log }) => log,
+        other => panic!("the first frame is {other:?}"),
+    }
 }
 
 fn ids(frames: &[Frame]) -> Vec<u64> {
@@ -385,6 +395,7 @@ async fn follower_rejects_an_invalid_entry_from_the_writer() {
     writer.allow(&f);
 
     let mut sub = subscribe(&writer, &f, once()).await;
+    log(&mut sub).await;
     let err = timeout(WAIT, sub.next())
         .await
         .expect("timed out")
@@ -424,6 +435,7 @@ async fn follower_rejects_an_unknown_schema_version() {
     let f = follower().await;
     writer.allow(&f);
     let mut sub = subscribe(&writer, &f, once()).await;
+    log(&mut sub).await;
     let err = timeout(WAIT, sub.next())
         .await
         .expect("timed out")
@@ -432,6 +444,69 @@ async fn follower_rejects_an_unknown_schema_version() {
         err.downcast_ref::<yappr::entry::Invalid>().is_some(),
         "{err:#}"
     );
+}
+
+#[tokio::test]
+async fn the_follower_checks_the_signature_of_each_entry() {
+    let writer = Writer::start().await;
+    let first = writer.post("s", "one");
+    let f = follower().await;
+    writer.allow(&f);
+    let mut sub = subscribe(&writer, &f, once()).await;
+    let name = log(&mut sub).await.unwrap();
+    let got = entries(&mut sub, 1).await.remove(0);
+    assert_eq!(got.verify(&writer.secret.public(), &name), Ok(true));
+
+    // The same signature with a changed body.
+    let mut forged = first;
+    forged.body = "two".into();
+    write_log(&writer, &[&serde_json::to_string(&forged).unwrap()]);
+    let mut sub = subscribe(&writer, &f, once()).await;
+    log(&mut sub).await;
+    let err = timeout(WAIT, sub.next())
+        .await
+        .expect("timed out")
+        .unwrap_err();
+    assert!(
+        err.downcast_ref::<yappr::entry::BadSignature>().is_some(),
+        "{err:#}"
+    );
+    assert!(client::is_final(&err));
+}
+
+#[tokio::test]
+async fn a_position_in_an_old_log_starts_the_new_log_from_the_first_entry() {
+    let writer = Writer::start().await;
+    writer.post("s", "one");
+    writer.post("s", "two");
+    let f = follower().await;
+    writer.allow(&f);
+    let mut sub = subscribe(&writer, &f, once()).await;
+    let old = log(&mut sub).await;
+    drop(sub);
+
+    std::fs::remove_file(writer.store.dir().join("feed.ndjson")).unwrap();
+    let writer = writer.restart().await;
+    writer.post("s", "new");
+    let req = Request {
+        since: 2,
+        log: old.clone(),
+        ..once()
+    };
+    let frames = drain(subscribe(&writer, &f, req.clone()).await).await;
+    assert_ne!(frames[0], Frame::Feed { log: old.clone() });
+    assert_eq!(ids(&frames), [1]);
+
+    let addr = writer.server.addr().await;
+    let mut follower = Follower::new(f.clone(), addr, req);
+    let mut got = vec![];
+    while let Some(event) = timeout(WAIT, follower.next()).await.unwrap().unwrap() {
+        if let Event::Entry(entry) = event {
+            got.push(entry.body);
+        }
+    }
+    assert_eq!(got, ["new"]);
+    assert_eq!(follower.log(), writer.store.log().unwrap().as_deref());
 }
 
 /// Like a short ticket: the follower knows only the endpoint id, and finds

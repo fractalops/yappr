@@ -35,6 +35,6 @@ pub mod store;
 ///
 /// A change to the protocol uses a new ALPN, so that both versions can run on
 /// one endpoint at the same time.
-pub const ALPN: &[u8] = b"feed/0";
+pub const ALPN: &[u8] = b"yappr/feed/1";
 
 pub use iroh_tickets::endpoint::EndpointTicket;

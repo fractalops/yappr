@@ -65,6 +65,10 @@ pub struct Entry {
     /// A JSON object for programs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The writer's signature, see [`Entry::verify`]. Entries from before
+    /// signatures do not have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig: Option<String>,
     /// Fields that this version does not know. They are kept, so that an
     /// entry goes through a pipeline with no loss.
     #[serde(flatten)]
@@ -201,7 +205,7 @@ impl Draft {
             Some(serde_json::Value::Object(data)) => Some(data),
             Some(_) => return Err(not_json("data is not a JSON object".into())),
         };
-        for writer_field in ["v", "id", "time"] {
+        for writer_field in ["v", "id", "time", "sig"] {
             fields.remove(writer_field);
         }
         Ok(Draft {
@@ -277,6 +281,98 @@ impl Entry {
     /// The position of the level in [`LEVELS`].
     pub fn level_rank(&self) -> usize {
         level_rank(self.level()).unwrap_or(0)
+    }
+
+    /// Sign the entry as entry `self.id` of the feed log `log`.
+    pub fn sign(&mut self, secret: &iroh::SecretKey, log: &str) {
+        self.sig = None;
+        let signature = secret.sign(&self.signed_bytes(log));
+        self.sig = Some(data_encoding::HEXLOWER.encode(&signature.to_bytes()));
+    }
+
+    /// Check the signature of `writer` for the feed log `log`. Returns false
+    /// for an entry without a signature.
+    pub fn verify(&self, writer: &iroh::EndpointId, log: &str) -> Result<bool, BadSignature> {
+        let Some(sig) = &self.sig else {
+            return Ok(false);
+        };
+        let bytes = data_encoding::HEXLOWER
+            .decode(sig.as_bytes())
+            .map_err(|_| BadSignature { id: self.id })?;
+        let signature =
+            iroh::Signature::try_from(bytes.as_slice()).map_err(|_| BadSignature { id: self.id })?;
+        let unsigned = Entry {
+            sig: None,
+            ..self.clone()
+        };
+        writer
+            .verify(&unsigned.signed_bytes(log), &signature)
+            .map_err(|_| BadSignature { id: self.id })?;
+        Ok(true)
+    }
+
+    /// The domain, the log, and the entry without `sig` as canonical JSON.
+    fn signed_bytes(&self, log: &str) -> Vec<u8> {
+        let mut bytes = SIGNATURE_DOMAIN.to_vec();
+        bytes.extend(log.as_bytes());
+        bytes.push(0);
+        let value = serde_json::to_value(self).expect("an entry is valid JSON");
+        canonical(&value, &mut bytes);
+        bytes
+    }
+}
+
+/// The start of the bytes that an entry signature covers.
+const SIGNATURE_DOMAIN: &[u8] = b"yappr/entry/1\0";
+
+/// The signature of an entry does not match its writer, its feed log, or its
+/// contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadSignature {
+    pub id: u64,
+}
+
+impl fmt::Display for BadSignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "entry {} does not have a valid signature of its writer",
+            self.id
+        )
+    }
+}
+
+impl std::error::Error for BadSignature {}
+
+/// Write `value` as JSON with the keys of each object in sorted order, so
+/// that the bytes do not depend on the order of the fields.
+fn canonical(value: &serde_json::Value, out: &mut Vec<u8>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push(b'{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                serde_json::to_writer(&mut *out, key).expect("a string is valid JSON");
+                out.push(b':');
+                canonical(&map[key], out);
+            }
+            out.push(b'}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push(b'[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                canonical(item, out);
+            }
+            out.push(b']');
+        }
+        other => serde_json::to_writer(&mut *out, other).expect("a value is valid JSON"),
     }
 }
 
@@ -721,12 +817,47 @@ mod tests {
             data: None,
             title: Some("disk usage".into()),
             body: "...".into(),
+            sig: None,
             extra: Default::default(),
         };
         assert_eq!(
             serde_json::to_string(&entry).unwrap(),
             r#"{"v":1,"id":42,"time":"2026-10-27T09:30:00Z","source":"disk","kind":"info","title":"disk usage","body":"..."}"#
         );
+    }
+
+    #[test]
+    fn a_signature_covers_the_writer_the_log_and_every_field() {
+        let secret = iroh::SecretKey::generate();
+        let mut entry: Entry = serde_json::from_str(
+            r#"{"v":1,"id":7,"time":"2026-10-27T09:30:00Z","source":"s","kind":"event","body":"b","data":{"b":1,"a":[2.5,"x"]},"host":"nas"}"#,
+        )
+        .unwrap();
+        assert_eq!(entry.verify(&secret.public(), "log"), Ok(false));
+        entry.sign(&secret, "log");
+        assert_eq!(entry.verify(&secret.public(), "log"), Ok(true));
+        let line = serde_json::to_string(&entry).unwrap();
+        let back: Entry = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.verify(&secret.public(), "log"), Ok(true));
+
+        let other = iroh::SecretKey::generate().public();
+        assert!(entry.verify(&other, "log").is_err());
+        assert!(entry.verify(&secret.public(), "another log").is_err());
+        let mut changed = entry.clone();
+        changed.extra.insert("host".into(), "web".into());
+        assert!(changed.verify(&secret.public(), "log").is_err());
+        let mut changed = entry.clone();
+        changed.id = 8;
+        assert!(changed.verify(&secret.public(), "log").is_err());
+        let mut changed = entry;
+        changed.sig = Some("00".into());
+        assert!(changed.verify(&secret.public(), "log").is_err());
+    }
+
+    #[test]
+    fn a_json_draft_drops_the_signature() {
+        let draft = Draft::from_json(r#"{"body":"b","sig":"00"}"#, &defaults()).unwrap();
+        assert!(draft.extra.is_empty());
     }
 
     #[test]
@@ -743,6 +874,7 @@ mod tests {
             data: None,
             title: None,
             body: "\x1b]0;pwned\x07".into(),
+            sig: None,
             extra: Default::default(),
         };
         assert!(matches!(entry.validate(), Err(Invalid::ControlChar { .. })));

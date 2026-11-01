@@ -8,6 +8,7 @@ use iroh::{
 };
 
 use crate::{
+    entry::BadSignature,
     proto::{self, Frame, Request, DENIED_CODE},
     ALPN,
 };
@@ -58,6 +59,11 @@ pub struct Subscription {
     conn: Connection,
     recv: RecvStream,
     me: EndpointId,
+    writer: EndpointId,
+    /// The log of the request's position.
+    asked: Option<String>,
+    /// The name of the writer's log, from [`Frame::Feed`].
+    log: Option<String>,
     /// The id of the last entry: the request's `since` until an entry arrives.
     last: u64,
 }
@@ -84,17 +90,30 @@ impl std::error::Error for OutOfOrder {}
 impl Subscription {
     /// The next frame, or `None` when the server ends the stream.
     ///
-    /// Each entry is checked against the entry rules, and its id must be greater
-    /// than the id before it.
+    /// Each entry is checked against the entry rules and against its
+    /// signature, and its id must be greater than the id before it.
     pub async fn next(&mut self) -> Result<Option<Frame>> {
         let frame = proto::read_frame(&mut self.recv, proto::MAX_FRAME)
             .await
             .map_err(|e| explain(&self.conn, self.me, e))?;
         match frame {
+            Some(Frame::Feed { log }) => {
+                // The writer starts again at the first entry of a new log.
+                if self.asked.is_some() && self.asked != log {
+                    self.last = 0;
+                }
+                self.asked = log.clone();
+                self.log = log.clone();
+                Ok(Some(Frame::Feed { log }))
+            }
             Some(Frame::Entry { entry }) => {
                 entry
                     .validate()
                     .with_context(|| format!("entry {} from the writer is not valid", entry.id))?;
+                if entry.sig.is_some() {
+                    let log = self.log.as_deref().ok_or(BadSignature { id: entry.id })?;
+                    entry.verify(&self.writer, log)?;
+                }
                 if entry.id <= self.last {
                     return Err(OutOfOrder {
                         previous: self.last,
@@ -126,6 +145,7 @@ pub async fn subscribe(
     req: &Request,
 ) -> Result<Subscription> {
     let me = endpoint.id();
+    let writer = addr.id;
     let conn = connect(endpoint, addr, ALPN).await?;
     let opened = async {
         let (mut send, recv) = conn.open_bi().await?;
@@ -139,6 +159,9 @@ pub async fn subscribe(
         conn,
         recv,
         me,
+        writer,
+        asked: req.log.clone(),
+        log: None,
         last: req.since,
     })
 }
@@ -225,6 +248,12 @@ impl Follower {
         self.sub.as_ref().map(|sub| sub.conn.clone())
     }
 
+    /// The name of the writer's log, after the writer sent it. Save it with
+    /// a position, and give it in the next request.
+    pub fn log(&self) -> Option<&str> {
+        self.req.log.as_deref()
+    }
+
     /// The endpoint that this follower uses.
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
@@ -245,6 +274,12 @@ impl Follower {
                 },
             };
             match sub.next().await {
+                Ok(Some(Frame::Feed { log })) => {
+                    if self.req.log.is_some() && self.req.log != log {
+                        self.req.since = 0;
+                    }
+                    self.req.log = log;
+                }
                 Ok(Some(Frame::Entry { entry })) => {
                     self.req.since = entry.id;
                     self.req.tail = None;
@@ -295,5 +330,6 @@ impl Follower {
 pub fn is_final(err: &anyhow::Error) -> bool {
     err.downcast_ref::<Denied>().is_some()
         || err.downcast_ref::<crate::entry::Invalid>().is_some()
+        || err.downcast_ref::<BadSignature>().is_some()
         || err.downcast_ref::<OutOfOrder>().is_some()
 }

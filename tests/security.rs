@@ -77,7 +77,9 @@ async fn revoked_stalled_request_does_not_read_a_new_entry() {
     rest.extend(bytes);
     let got = if send.write_all(&rest).await.is_ok() {
         send.finish().ok();
-        timeout(
+        // The first frame can name the log. Look at every frame.
+        let mut entry = None;
+        while let Some(frame) = timeout(
             Duration::from_secs(2),
             proto::read_frame::<Frame>(&mut recv, proto::MAX_FRAME),
         )
@@ -85,6 +87,13 @@ async fn revoked_stalled_request_does_not_read_a_new_entry() {
         .ok()
         .and_then(Result::ok)
         .flatten()
+        {
+            if matches!(frame, Frame::Entry { .. }) {
+                entry = Some(frame);
+                break;
+            }
+        }
+        entry
     } else {
         None
     };
@@ -241,7 +250,7 @@ fn cursor_save_does_not_truncate_a_symbolic_link_target() {
     .unwrap();
     Cursor::new(dir.path(), feed, "script")
         .unwrap()
-        .save(42)
+        .save(42, None)
         .ok();
     assert_eq!(
         std::fs::read_to_string(victim).unwrap(),
@@ -263,11 +272,11 @@ fn cursor_names_do_not_share_a_temporary_file() {
                 let mut failures = 0;
                 for _ in 0..250 {
                     barrier.wait();
-                    if cursor.save(value).is_err() {
+                    if cursor.save(value, None).is_err() {
                         failures += 1;
                     }
                     barrier.wait();
-                    if cursor.load().ok() != Some(value) {
+                    if cursor.load().ok().map(|p| p.id) != Some(value) {
                         failures += 1;
                     }
                 }
@@ -354,10 +363,15 @@ async fn zero_limit_does_not_stop_the_router() {
     )
     .await;
     let alive = match healthy {
-        Ok(mut sub) => matches!(
-            timeout(Duration::from_secs(2), sub.next()).await,
-            Ok(Ok(Some(Frame::Entry { .. })))
-        ),
+        Ok(mut sub) => {
+            matches!(
+                timeout(Duration::from_secs(2), sub.next()).await,
+                Ok(Ok(Some(Frame::Feed { .. })))
+            ) && matches!(
+                timeout(Duration::from_secs(2), sub.next()).await,
+                Ok(Ok(Some(Frame::Entry { .. })))
+            )
+        }
         Err(_) => false,
     };
     peer.close().await;

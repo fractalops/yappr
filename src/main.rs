@@ -16,14 +16,15 @@ use yappr::{
     client::{Denied, Event, Follower, Unreachable},
     control::ControlClient,
     cursor::Cursor,
+    deliver::{self, Hello},
     disk,
     entry::{self, Draft, Entry, Invalid},
     ingest::{self, Rejected},
     net::{self, NetOptions, Network},
     outbox, pairing, peers,
-    proto::Request,
+    proto::{Request, Stored},
     render::{self, ColorChoice, Output, Renderer},
-    server::Server,
+    server::{Feed, Server},
     store::Store,
     EndpointTicket,
 };
@@ -219,7 +220,8 @@ enum Commands {
     /// `status` replaces it.
     #[clap(hide = true)]
     Devices,
-    /// Send queued choices again.
+    /// Send queued answers again, and deliver this feed to the devices
+    /// that receive it.
     Retry,
     /// Name devices locally. An alias does not grant access. `yappr status` lists them.
     Alias {
@@ -699,7 +701,7 @@ async fn post(common: &CommonArgs, mut args: PostArgs) -> Result<()> {
             data: details.data,
             extra: Default::default(),
         };
-        return ingest::run(
+        let ingested = ingest::run(
             &store,
             &defaults,
             io::stdin(),
@@ -708,6 +710,8 @@ async fn post(common: &CommonArgs, mut args: PostArgs) -> Result<()> {
             stop,
         )
         .await;
+        let delivered = deliver_now(common, &store, store.last_id()?).await;
+        return ingested.and(delivered);
     }
     let store = common.store()?;
     let body = match args.body {
@@ -730,8 +734,88 @@ async fn post(common: &CommonArgs, mut args: PostArgs) -> Result<()> {
     };
     let entry = store.append(draft)?;
     println!("{}", entry.id);
-    Ok(())
+    deliver_now(common, &store, entry.id).await
 }
+
+/// The allowed devices that receive this feed, when this process must
+/// deliver to them. A running writer delivers by itself, so then the list is
+/// empty.
+fn own_receivers(store: &Store) -> Result<Vec<(String, EndpointAddr)>> {
+    if disk::try_lock(store.dir(), SERVE_LOCK)?.is_none() {
+        return Ok(Vec::new());
+    }
+    let allowed = store.allow_list().load()?;
+    Ok(peers::receivers(store.dir())?
+        .into_iter()
+        .filter(|(_, addr)| allowed.contains(&addr.id))
+        .collect())
+}
+
+/// How long a command waits for the devices to save a new entry.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Deliver the feed up to entry `through` to each device that receives it,
+/// all at the same time.
+async fn deliver_now(common: &CommonArgs, store: &Store, through: u64) -> Result<()> {
+    let receivers = own_receivers(store)?;
+    if receivers.is_empty() || through == 0 {
+        return Ok(());
+    }
+    let secret = common.secret()?;
+    let endpoint = net::bind(iroh::SecretKey::generate(), common.net(None)?, vec![], None).await?;
+    let feed = Feed::open(store.clone()).await?;
+    let hello = Hello::granted(&secret, endpoint.id());
+    let mut tasks = tokio::task::JoinSet::new();
+    for (alias, addr) in receivers {
+        let (endpoint, feed, hello) = (endpoint.clone(), feed.clone(), hello.clone());
+        tasks.spawn(async move {
+            let progress = tokio::sync::watch::channel(Stored::default()).0;
+            let delivered = timeout(
+                DELIVERY_TIMEOUT,
+                deliver::deliver(&endpoint, &feed, addr, &hello, Some(through), &progress),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "no confirmation in {}s",
+                    DELIVERY_TIMEOUT.as_secs()
+                ))
+            });
+            (alias, delivered)
+        });
+    }
+    let mut missed = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        let (alias, delivered) = joined?;
+        if let Err(error) = delivered {
+            eprintln!("{alias} did not confirm entry {through}: {error:#}");
+            missed.push(alias);
+        }
+    }
+    endpoint.close().await;
+    if missed.is_empty() {
+        return Ok(());
+    }
+    Err(Undelivered { devices: missed }.into())
+}
+
+/// A device that receives the feed did not confirm a new entry.
+#[derive(Debug)]
+struct Undelivered {
+    devices: Vec<String>,
+}
+
+impl std::fmt::Display for Undelivered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the entry is saved, but {} did not confirm it. \"yappr serve\" or \"yappr retry\" delivers it later",
+            self.devices.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for Undelivered {}
 
 /// A future that completes on Ctrl-C. The handler is active when this
 /// returns, not only when the future is first polled.
@@ -798,21 +882,28 @@ fn short_ticket(addr: &EndpointAddr) -> EndpointTicket {
 }
 
 async fn serve(common: &CommonArgs, args: ServeArgs) -> Result<()> {
-    let (_store, server, _ticket) = start_serving(common, args.port, true).await?;
+    let (_store, server, _ticket, _lock) = start_serving(common, args.port, true).await?;
     tokio::signal::ctrl_c().await?;
     eprintln!("got ctrl-c, exiting");
     server.shutdown().await;
     Ok(())
 }
 
+/// The lock that a running writer holds. Other commands then leave delivery
+/// to the writer.
+const SERVE_LOCK: &str = "serve.lock";
+
 /// Start the server, save its ticket, and print how to read it. With
-/// `pair_hint`, a feed that no device can read gets a hint to run pair.
+/// `pair_hint`, a feed that no device can read gets a hint to run pair. The
+/// returned lock shows other commands that the writer runs.
 async fn start_serving(
     common: &CommonArgs,
     port: Option<u16>,
     pair_hint: bool,
-) -> Result<(Store, Server, EndpointTicket)> {
+) -> Result<(Store, Server, EndpointTicket, std::fs::File)> {
     let store = common.store()?;
+    let lock = disk::try_lock(store.dir(), SERVE_LOCK)?
+        .with_context(|| format!("yappr already serves {}", store.dir().display()))?;
     let opts = common.net(port)?;
     let wait_for_relay = opts.network == Network::Default && !opts.relays.disabled;
     let server = Server::spawn(store.clone(), common.secret()?, opts).await?;
@@ -846,14 +937,14 @@ async fn start_serving(
     }
     eprintln!("To read the feed on another computer, use:\nyappr read {ticket}");
     eprintln!("or, with the endpoint id only:\nyappr read {short}");
-    Ok((store, server, ticket))
+    Ok((store, server, ticket, lock))
 }
 
 async fn init(common: &CommonArgs, args: InitArgs) -> Result<()> {
     if let Some(alias) = &args.alias {
         peers::validate_alias(alias)?;
     }
-    let (store, server, ticket) = start_serving(common, args.port, false).await?;
+    let (store, server, ticket, _lock) = start_serving(common, args.port, false).await?;
     let name = args.name.unwrap_or_else(hostname);
     let outcome =
         pairing_session(&store, ticket.to_string(), name, args.expires, args.alias).await?;
@@ -919,9 +1010,7 @@ async fn on(common: &CommonArgs, args: OnArgs) -> Result<()> {
                     // Also save 0, so that the next start does not run the
                     // entries that arrive in between as history.
                     let saved = cursor.load()?;
-                    if !cursor.exists()
-                        || head > saved.id
-                        || saved.log.as_deref() != follower.log()
+                    if !cursor.exists() || head > saved.id || saved.log.as_deref() != follower.log()
                     {
                         cursor.save(head, follower.log())?;
                     }
@@ -1482,14 +1571,15 @@ fn status(common: &CommonArgs, text: bool) -> Result<()> {
     let mut peers = Vec::new();
     let mut named = std::collections::BTreeSet::new();
     for (alias, peer) in peers::list(store.dir())? {
-        peers.push((Some(alias), peer.id, allowed.contains(&peer.id)));
+        let reads = allowed.contains(&peer.id);
+        peers.push((Some(alias), peer.id, reads, reads && peer.receives));
         named.insert(peer.id);
     }
     peers.extend(
         allowed
             .iter()
             .filter(|id| !named.contains(*id))
-            .map(|id| (None, *id, true)),
+            .map(|id| (None, *id, true, false)),
     );
     let mut questions = std::collections::BTreeMap::<String, u64>::new();
     for state in choices::list(&store.entries()?) {
@@ -1502,7 +1592,9 @@ fn status(common: &CommonArgs, text: bool) -> Result<()> {
     if !text {
         let peers: Vec<_> = peers
             .iter()
-            .map(|(alias, id, reads)| serde_json::json!({"alias": alias, "id": id, "reads": reads}))
+            .map(|(alias, id, reads, receives)| {
+                serde_json::json!({"alias": alias, "id": id, "reads": reads, "receives": receives})
+            })
             .collect();
         let json = serde_json::json!({
             "endpoint": id,
@@ -1524,11 +1616,16 @@ fn status(common: &CommonArgs, text: bool) -> Result<()> {
     if peers.is_empty() {
         println!("peers      none. Run \"yappr init\" or \"yappr pair\" to pair a device.");
     } else {
-        println!("peers                            reads this feed");
-        for (alias, id, reads) in &peers {
+        println!("peers                            reads this feed  receives entries");
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        for (alias, id, reads, receives) in &peers {
             let alias = alias.as_deref().unwrap_or("-");
-            let reads = if *reads { "yes" } else { "no" };
-            println!("  {alias:<16} {:<14} {reads}", id.fmt_short());
+            println!(
+                "  {alias:<16} {:<14} {:<16} {}",
+                id.fmt_short(),
+                yes(*reads),
+                yes(*receives)
+            );
         }
     }
     println!();
@@ -1624,7 +1721,7 @@ async fn ask(
     let question: Question = choices::create_with(&store, question, args.details.into_details())?;
     if args.no_wait {
         println!("{}", question.id);
-        return Ok(());
+        return deliver_now(common, &store, store.last_id()?).await;
     }
     eprintln!(
         "Question {}. Waiting for {}.",
@@ -1652,6 +1749,7 @@ async fn wait(common: &CommonArgs, id: &str) -> Result<()> {
     // Read only the entries that arrive after each check.
     let mut reader = store.reader()?;
     let mut tracker = choices::Tracker::one(id);
+    let mut delivery = None;
     loop {
         while let Some(entry) = reader.next_entry()? {
             tracker.push(&entry);
@@ -1660,10 +1758,80 @@ async fn wait(common: &CommonArgs, id: &str) -> Result<()> {
             .states()
             .pop()
             .ok_or_else(|| choices::ChoiceError::new("not_found", "the question does not exist"))?;
+        let pending = state.status == "pending";
+        if pending && delivery.is_none() {
+            delivery = Some(
+                QuestionDelivery::start(common, &store, state.question.responder)
+                    .await
+                    .unwrap_or_else(|error| {
+                        eprintln!("cannot deliver the question: {error:#}");
+                        None
+                    }),
+            );
+        }
         match finish(state) {
-            Some(result) => return result,
+            Some(result) => {
+                if let Some(delivery) = delivery.flatten() {
+                    delivery.finish(store.last_id()?).await;
+                }
+                return result;
+            }
             None => tokio::time::sleep(Duration::from_millis(200)).await,
         }
+    }
+}
+
+/// Delivers the feed to the device that answers a question, while the
+/// question waits and no running writer delivers it.
+struct QuestionDelivery {
+    endpoint: iroh::Endpoint,
+    task: n0_future::task::AbortOnDropHandle<()>,
+    progress: tokio::sync::watch::Receiver<Stored>,
+}
+
+impl QuestionDelivery {
+    async fn start(
+        common: &CommonArgs,
+        store: &Store,
+        device: iroh::EndpointId,
+    ) -> Result<Option<Self>> {
+        let Some((_, addr)) = own_receivers(store)?
+            .into_iter()
+            .find(|(_, addr)| addr.id == device)
+        else {
+            return Ok(None);
+        };
+        let secret = common.secret()?;
+        let endpoint =
+            net::bind(iroh::SecretKey::generate(), common.net(None)?, vec![], None).await?;
+        let feed = Feed::open(store.clone()).await?;
+        let (progress, seen) = tokio::sync::watch::channel(Stored::default());
+        let transport = endpoint.id();
+        let task = tokio::spawn(deliver::deliver_until_stopped(
+            endpoint.clone(),
+            feed,
+            addr,
+            move || Hello::granted(&secret, transport),
+            progress,
+        ));
+        Ok(Some(Self {
+            endpoint,
+            task: n0_future::task::AbortOnDropHandle::new(task),
+            progress: seen,
+        }))
+    }
+
+    /// Give the device a few seconds to save the entries up to `through`,
+    /// such as the decision, then stop.
+    async fn finish(mut self, through: u64) {
+        timeout(
+            Duration::from_secs(5),
+            self.progress.wait_for(|stored| stored.through >= through),
+        )
+        .await
+        .ok();
+        drop(self.task);
+        self.endpoint.close().await;
     }
 }
 
@@ -1797,7 +1965,9 @@ async fn retry(common: &CommonArgs) -> Result<()> {
     }
     client.close().await;
     endpoint.close().await;
-    failure.map_or(Ok(()), Err)
+    let store = common.store()?;
+    let delivered = deliver_now(common, &store, store.last_id()?).await;
+    failure.map_or(delivered, Err)
 }
 
 async fn pair(common: &CommonArgs, args: PairArgs) -> Result<()> {
@@ -1867,7 +2037,10 @@ async fn pairing_session(
                     Some(alias) => alias.clone(),
                     None => peers::alias_for(store.dir(), &candidate.name, candidate.id)?,
                 };
-                peers::set(store.dir(), &alias, &candidate.id.to_string())?;
+                match &candidate.ticket {
+                    Some(ticket) => peers::set_receiver(store.dir(), &alias, &ticket.parse()?)?,
+                    None => peers::set(store.dir(), &alias, &candidate.id.to_string())?,
+                }
                 eprintln!("Paired. The device is \"{alias}\" on this machine.");
                 return Ok(PairOutcome::Accepted);
             }
@@ -2000,6 +2173,7 @@ async fn join(common: &CommonArgs, text: &str, name: String, alias: Option<Strin
                     &pairing::Join {
                         token: invitation.token.clone(),
                         name: name.clone(),
+                        ticket: None,
                     },
                 )
                 .await
@@ -2186,7 +2360,9 @@ fn exit_code(err: &anyhow::Error) -> i32 {
         || err.downcast_ref::<yappr::client::OutOfOrder>().is_some()
     {
         4
-    } else if err.downcast_ref::<Unreachable>().is_some() {
+    } else if err.downcast_ref::<Unreachable>().is_some()
+        || err.downcast_ref::<Undelivered>().is_some()
+    {
         5
     } else {
         1

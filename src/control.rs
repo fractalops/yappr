@@ -59,28 +59,39 @@ mod writer {
     pub struct ChoicesProtocol(pub Store);
     impl ProtocolHandler for ChoicesProtocol {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-            serve(conn, self.0.clone(), false).await;
+            serve(conn, self.0.clone(), false, Some(IDLE)).await;
             Ok(())
         }
+    }
+
+    /// Answer choice requests on a connection that this writer opened to
+    /// deliver its feed, until the connection closes.
+    pub async fn answer_on(conn: Connection, store: Store) {
+        serve(conn, store, false, None).await;
     }
     #[derive(Debug, Clone)]
     pub struct PairProtocol(pub Store);
     impl ProtocolHandler for PairProtocol {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-            serve(conn, self.0.clone(), true).await;
+            serve(conn, self.0.clone(), true, Some(IDLE)).await;
             Ok(())
         }
     }
 
-    async fn serve(conn: Connection, store: Store, pair: bool) {
+    /// Answer requests until the connection closes, or until no request
+    /// arrives for `idle`.
+    async fn serve(conn: Connection, store: Store, pair: bool, idle: Option<Duration>) {
         let mut requests = JoinSet::new();
         loop {
             // Bound concurrent work. New streams remain flow-controlled by QUIC.
             while requests.len() >= MAX_STREAMS {
                 requests.join_next().await;
             }
-            let accepted = n0_future::time::timeout(IDLE, conn.accept_bi()).await;
-            let Ok(Ok((send, recv))) = accepted else {
+            let accepted = match idle {
+                Some(idle) => n0_future::time::timeout(idle, conn.accept_bi()).await.ok(),
+                None => Some(conn.accept_bi().await),
+            };
+            let Some(Ok((send, recv))) = accepted else {
                 break;
             };
             while requests.try_join_next().is_some() {}
@@ -101,7 +112,10 @@ mod writer {
         }
         // A stream can commit a decision even when its caller loses the response.
         while requests.join_next().await.is_some() {}
-        conn.close(VarInt::from_u32(0), b"control idle or closed");
+        // A delivery connection belongs to the delivery, which closes it.
+        if idle.is_some() {
+            conn.close(VarInt::from_u32(0), b"control idle or closed");
+        }
     }
 
     async fn handle(
@@ -163,7 +177,25 @@ mod writer {
     }
 }
 #[cfg(not(wasm_browser))]
-pub use writer::{ChoicesProtocol, PairProtocol};
+pub use writer::{answer_on, ChoicesProtocol, PairProtocol};
+
+/// Send one request on `conn`, a connection that is already open, and read
+/// the reply. A device uses it to answer a writer that delivers its feed.
+pub async fn exchange_on<Q: Serialize, A: DeserializeOwned>(
+    conn: &Connection,
+    request: &Q,
+) -> Result<A> {
+    n0_future::time::timeout(Duration::from_secs(15), async {
+        let (mut send, mut recv) = conn.open_bi().await?;
+        proto::write_frame(&mut send, request, MAX_CONTROL).await?;
+        send.finish()?;
+        proto::read_frame::<A>(&mut recv, proto::MAX_FRAME)
+            .await?
+            .context("the writer sent no response")
+    })
+    .await
+    .context("the writer did not respond within 15 seconds")?
+}
 
 type PoolKey = (EndpointId, Vec<u8>);
 #[derive(Debug)]
@@ -248,8 +280,7 @@ impl ControlClient {
         if let Some(conn) = &slot.connection {
             return Ok(conn.clone());
         }
-        #[cfg(wasm_browser)]
-        let addr = crate::net::browser_addr(addr);
+        let addr = crate::net::relay_addr(addr);
         let conn = self.endpoint.connect(addr, alpn).await?;
         slot.connection = Some(conn.clone());
         Ok(conn)

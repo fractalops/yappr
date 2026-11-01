@@ -206,6 +206,7 @@ fn rejected_invitation_closes_unknown_admission() {
         pairing::Join {
             token: invitation.token,
             name: "Reader".into(),
+            ticket: None,
         },
     )
     .unwrap();
@@ -397,6 +398,7 @@ async fn accepted_pairing_result_survives_the_claim_deadline() {
     let join = pairing::Join {
         token: invitation.token,
         name: "Reader".into(),
+        ticket: None,
     };
     pairing::join(&store, remote, join.clone()).unwrap();
     pairing::confirm(&store, remote, true).unwrap();

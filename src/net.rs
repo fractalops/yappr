@@ -95,21 +95,24 @@ impl RelaySettings {
         crate::disk::write(&dir.join("network.json"), self)
     }
 
-    /// The relay mode of these settings. `None` keeps the preset relays.
-    fn relay_mode(&self) -> Result<Option<RelayMode>> {
+    /// The relay mode of these settings: the n0 relays or the custom relays,
+    /// with each URL as [`without_trailing_dot`] gives it.
+    fn relay_mode(&self) -> Result<RelayMode> {
         self.validate()?;
         if self.disabled {
-            return Ok(Some(RelayMode::Disabled));
+            return Ok(RelayMode::Disabled);
         }
-        if self.urls.is_empty() {
-            return Ok(None);
-        }
-        let urls: Vec<RelayUrl> = self
-            .urls
-            .iter()
-            .map(|s| s.parse())
-            .collect::<Result<_, _>>()?;
-        Ok(Some(RelayMode::Custom(RelayMap::from_iter(urls))))
+        let urls: Vec<RelayUrl> = if self.urls.is_empty() {
+            iroh::defaults::prod::default_relay_map().urls()
+        } else {
+            self.urls
+                .iter()
+                .map(|s| s.parse())
+                .collect::<Result<_, _>>()?
+        };
+        Ok(RelayMode::Custom(RelayMap::from_iter(
+            urls.iter().map(without_trailing_dot),
+        )))
     }
 }
 
@@ -120,21 +123,17 @@ pub async fn bind(secret: SecretKey, relays: &RelaySettings) -> Result<Endpoint>
     if relays.disabled {
         anyhow::bail!("a browser needs a relay");
     }
-    let urls: Vec<RelayUrl> = match relays.relay_mode()? {
-        Some(RelayMode::Custom(map)) => map.urls(),
-        _ => iroh::defaults::prod::default_relay_map().urls(),
-    };
-    let map = RelayMap::from_iter(urls.iter().map(without_trailing_dot));
     Ok(Endpoint::builder(presets::N0)
         .secret_key(secret)
-        .relay_mode(RelayMode::Custom(map))
+        .relay_mode(relays.relay_mode()?)
         .bind()
         .await?)
 }
 
 /// `url` without the trailing dot of its host name. WebKit sends that dot in
-/// the TLS server name, and a relay refuses such a handshake.
-#[cfg(wasm_browser)]
+/// the TLS server name, and a relay refuses such a handshake. Every endpoint
+/// uses this form: with two forms of one relay URL, an endpoint opens two
+/// sessions to one relay, and the relay keeps only one of them.
 fn without_trailing_dot(url: &RelayUrl) -> RelayUrl {
     match url.host_str() {
         Some(host) if host.ends_with('.') => url
@@ -146,9 +145,9 @@ fn without_trailing_dot(url: &RelayUrl) -> RelayUrl {
     }
 }
 
-/// `addr` with relay URLs that a browser can open. See [`without_trailing_dot`].
-#[cfg(wasm_browser)]
-pub fn browser_addr(addr: EndpointAddr) -> EndpointAddr {
+/// `addr` with relay URLs in the form that every endpoint uses. See
+/// [`without_trailing_dot`].
+pub fn relay_addr(addr: EndpointAddr) -> EndpointAddr {
     let addrs = addr.addrs.into_iter().map(|a| match a {
         iroh::TransportAddr::Relay(url) => iroh::TransportAddr::Relay(without_trailing_dot(&url)),
         other => other,
@@ -182,8 +181,8 @@ pub async fn bind(
     if opts.network == Network::Local && !opts.relays.urls.is_empty() {
         anyhow::bail!("relay settings do not apply to loopback test mode");
     }
-    if let Some(mode) = opts.relays.relay_mode()? {
-        builder = builder.relay_mode(mode);
+    if opts.network == Network::Default {
+        builder = builder.relay_mode(opts.relays.relay_mode()?);
     }
     if opts.mdns {
         builder = builder.address_lookup(MdnsAddressLookup::builder());
@@ -249,6 +248,24 @@ mod tests {
             .local_addr()
             .unwrap()
             .port()
+    }
+
+    #[test]
+    fn every_endpoint_uses_relay_urls_without_a_trailing_dot() {
+        let RelayMode::Custom(map) = RelaySettings::default().relay_mode().unwrap() else {
+            panic!("the n0 relays are custom relays without the dot");
+        };
+        let urls: Vec<RelayUrl> = map.urls();
+        assert!(!urls.is_empty());
+        assert!(urls
+            .iter()
+            .all(|url| !url.host_str().unwrap().ends_with('.')));
+        let addr = EndpointAddr::new(SecretKey::generate().public())
+            .with_relay_url("https://relay.example.com./".parse().unwrap());
+        assert_eq!(
+            relay_addr(addr).relay_urls().next().unwrap().to_string(),
+            "https://relay.example.com/"
+        );
     }
 
     #[test]

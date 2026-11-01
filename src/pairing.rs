@@ -111,6 +111,9 @@ impl Invitation {
 pub struct Candidate {
     pub id: EndpointId,
     pub name: String,
+    /// The address where the device receives this feed's entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Offer {
@@ -128,7 +131,15 @@ struct Offers {
 pub struct Join {
     pub token: String,
     pub name: String,
+    /// The ticket of a device that receives entries, such as the app. The
+    /// writer then delivers its entries to that address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
+
+/// The longest ticket in a [`Join`], in bytes.
+#[cfg(not(wasm_browser))]
+const MAX_TICKET: usize = 4096;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairReply {
     pub status: String,
@@ -226,6 +237,15 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
     {
         bail!("use a device name with 1 to 64 bytes on one line");
     }
+    if let Some(text) = &request.ticket {
+        if text.len() > MAX_TICKET {
+            bail!("the device address is too long");
+        }
+        let ticket: EndpointTicket = text.parse().context("the device address is not valid")?;
+        if ticket.endpoint_addr().id != remote {
+            bail!("the device address belongs to another device");
+        }
+    }
     let _lock = disk::lock(store.dir(), "pairing.lock")?;
     let path = store.dir().join("pairing.json");
     let mut offers: Offers = disk::read(&path)?;
@@ -252,6 +272,7 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
             offer.candidate = Some(Candidate {
                 id: remote,
                 name: request.name,
+                ticket: request.ticket,
             });
             true
         }
@@ -345,6 +366,31 @@ mod tests {
     fn a_code_is_short() {
         let code = invitation().encode().unwrap();
         assert!(code.len() < 300, "{} characters", code.len());
+    }
+
+    #[cfg(not(wasm_browser))]
+    #[test]
+    fn a_device_that_receives_gives_its_own_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let writer = iroh::SecretKey::generate().public();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(writer)).to_string();
+        let expires_at = Timestamp::now() + jiff::SignedDuration::from_secs(60);
+        let invitation = create(&store, ticket, "Mac".into(), expires_at).unwrap();
+        let phone = iroh::SecretKey::generate().public();
+        let join_with = |id: EndpointId| Join {
+            token: invitation.token.clone(),
+            name: "Phone".into(),
+            ticket: Some(EndpointTicket::new(iroh::EndpointAddr::new(id)).to_string()),
+        };
+        let other = iroh::SecretKey::generate().public();
+        assert!(join(&store, phone, join_with(other)).is_err());
+        join(&store, phone, join_with(phone)).unwrap();
+        let candidate = get(store.dir(), &invitation.token)
+            .unwrap()
+            .candidate
+            .unwrap();
+        assert_eq!(candidate.ticket, join_with(phone).ticket);
     }
 
     #[test]

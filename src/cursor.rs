@@ -124,7 +124,11 @@ mod tests {
             0
         );
         assert_eq!(
-            Cursor::new(dir.path(), b, "tty").unwrap().load().unwrap().id,
+            Cursor::new(dir.path(), b, "tty")
+                .unwrap()
+                .load()
+                .unwrap()
+                .id,
             0
         );
     }

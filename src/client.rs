@@ -3,7 +3,7 @@ use std::{fmt, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use iroh::{
-    endpoint::{Connection, ConnectionError, RecvStream, VarInt},
+    endpoint::{Connection, ConnectionError, RecvStream, SendStream, VarInt},
     Endpoint, EndpointAddr, EndpointId,
 };
 
@@ -58,6 +58,8 @@ impl std::error::Error for Unreachable {}
 pub struct Subscription {
     conn: Connection,
     recv: RecvStream,
+    /// The stream for [`Subscription::stored`], in a delivery.
+    send: Option<SendStream>,
     me: EndpointId,
     writer: EndpointId,
     /// The log of the request's position.
@@ -88,6 +90,51 @@ impl fmt::Display for OutOfOrder {
 impl std::error::Error for OutOfOrder {}
 
 impl Subscription {
+    /// A request on a stream that a writer opened to deliver its feed. See
+    /// [`crate::deliver`].
+    pub(crate) async fn delivered(
+        conn: Connection,
+        (mut send, recv): (SendStream, RecvStream),
+        me: EndpointId,
+        writer: EndpointId,
+        req: &Request,
+    ) -> Result<Self> {
+        proto::write_frame(&mut send, req, proto::MAX_REQUEST).await?;
+        Ok(Self {
+            me,
+            conn,
+            recv,
+            send: Some(send),
+            writer,
+            asked: req.log.clone(),
+            log: None,
+            last: req.since,
+        })
+    }
+
+    /// Tell the writer that this device saved the entries up to `through`
+    /// in the current log. Only a delivery has a stream for it.
+    pub async fn stored(&mut self, through: u64) -> Result<()> {
+        let Some(send) = &mut self.send else {
+            bail!("only a delivery can report saved entries");
+        };
+        let stored = proto::Stored {
+            log: self.log.clone(),
+            through,
+        };
+        proto::write_frame(send, &stored, proto::MAX_REQUEST).await
+    }
+
+    /// The connection of this request.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// The name of the writer's log, after the writer sent it.
+    pub fn log(&self) -> Option<&str> {
+        self.log.as_deref()
+    }
+
     /// The next frame, or `None` when the server ends the stream.
     ///
     /// Each entry is checked against the entry rules and against its
@@ -158,6 +205,7 @@ pub async fn subscribe(
     Ok(Subscription {
         conn,
         recv,
+        send: None,
         me,
         writer,
         asked: req.log.clone(),
@@ -168,8 +216,7 @@ pub async fn subscribe(
 
 async fn connect(endpoint: &Endpoint, addr: EndpointAddr, alpn: &[u8]) -> Result<Connection> {
     let writer = addr.id;
-    #[cfg(wasm_browser)]
-    let addr = crate::net::browser_addr(addr);
+    let addr = crate::net::relay_addr(addr);
     match n0_future::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, alpn)).await {
         Ok(Ok(conn)) => Ok(conn),
         Ok(Err(e)) => Err(Unreachable {

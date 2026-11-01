@@ -14,7 +14,7 @@ use crate::{
     access::{AccessHook, DENIED_CODE, DENIED_REASON},
     entry::Entry,
     net::{self, NetOptions},
-    proto::{self, Frame, Request},
+    proto::{self, Frame, Request, Stored},
     store::{LogReader, Store},
     ALPN,
 };
@@ -46,28 +46,21 @@ impl std::error::Error for Revoked {}
 #[derive(Debug)]
 pub struct Server {
     router: Router,
-    _poll: AbortOnDropHandle<()>,
+    _deliveries: AbortOnDropHandle<()>,
 }
 
 impl Server {
-    /// Start to serve `store`.
+    /// Start to serve `store`, and deliver its entries to the devices that
+    /// receive them.
     pub async fn spawn(
         store: Store,
         secret: SecretKey,
         net: impl Into<NetOptions>,
     ) -> Result<Self> {
-        let mut watcher = Watcher {
-            reader: Some(store.reader()?),
-            head: watch::Sender::new(0),
-        };
-        watcher.sync().await?;
-        let head = watcher.head.subscribe();
-        let watcher = Arc::new(Mutex::new(watcher));
-        let poll = AbortOnDropHandle::new(tokio::spawn(poll(watcher.clone())));
-
+        let feed = Feed::open(store.clone()).await?;
         let hook = AccessHook::new(store.allow_list());
         let endpoint = net::bind(secret, net, vec![], Some(hook)).await?;
-        let router = Router::builder(endpoint)
+        let router = Router::builder(endpoint.clone())
             .accept(
                 crate::control::ALPN,
                 crate::control::ChoicesProtocol(store.clone()),
@@ -76,18 +69,14 @@ impl Server {
                 crate::pairing::ALPN,
                 crate::control::PairProtocol(store.clone()),
             )
-            .accept(
-                ALPN,
-                FeedProtocol {
-                    store,
-                    head,
-                    watcher,
-                },
-            )
+            .accept(ALPN, FeedProtocol { feed: feed.clone() })
             .spawn();
+        let deliveries = AbortOnDropHandle::new(tokio::spawn(crate::deliver::keep_delivering(
+            endpoint, feed,
+        )));
         Ok(Self {
             router,
-            _poll: poll,
+            _deliveries: deliveries,
         })
     }
 
@@ -103,6 +92,81 @@ impl Server {
     /// Stop the server.
     pub async fn shutdown(self) {
         self.router.shutdown().await.ok();
+    }
+}
+
+/// The entries of a store for other devices, with a watch on the id of the
+/// last entry.
+#[derive(Debug, Clone)]
+pub struct Feed {
+    store: Store,
+    head: watch::Receiver<u64>,
+    watcher: Arc<Mutex<Watcher>>,
+    _poll: Arc<AbortOnDropHandle<()>>,
+}
+
+impl Feed {
+    /// Start to watch `store` for new entries.
+    pub async fn open(store: Store) -> Result<Self> {
+        let mut watcher = Watcher {
+            reader: Some(store.reader()?),
+            head: watch::Sender::new(0),
+        };
+        watcher.sync().await?;
+        let head = watcher.head.subscribe();
+        let watcher = Arc::new(Mutex::new(watcher));
+        let poll = AbortOnDropHandle::new(tokio::spawn(poll(watcher.clone())));
+        Ok(Self {
+            store,
+            head,
+            watcher,
+            _poll: Arc::new(poll),
+        })
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Read a request from `recv` and send the entries to `remote`, while
+    /// `remote` is in the allow list. With `acks`, the frames that `remote`
+    /// sends after its request go to `acks`.
+    pub async fn answer(
+        &self,
+        conn: &Connection,
+        mut send: SendStream,
+        recv: RecvStream,
+        acks: Option<watch::Sender<Stored>>,
+    ) {
+        let remote = conn.remote_id();
+        // Close the connection when the follower loses access, also while the
+        // server waits for its request or for a slow replay.
+        let allow_list = self.store.allow_list();
+        let guarded = conn.clone();
+        let _guard = AbortOnDropHandle::new(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(ACCESS_CHECK).await;
+                if !allow_list.contains(&remote) {
+                    guarded.close(VarInt::from_u32(DENIED_CODE), DENIED_REASON);
+                    return;
+                }
+            }
+        }));
+        if let Err(e) = self.serve(&mut send, recv, remote, acks).await {
+            tracing::debug!("{remote}: {e:#}");
+            if e.downcast_ref::<Revoked>().is_some() {
+                // The follower reads this code as "denied" and does not reconnect.
+                conn.close(VarInt::from_u32(DENIED_CODE), DENIED_REASON);
+                return;
+            }
+            let frame = Frame::Error {
+                message: format!("{e:#}"),
+            };
+            proto::write_frame(&mut send, &frame, proto::MAX_FRAME)
+                .await
+                .ok();
+        }
+        send.finish().ok();
     }
 }
 
@@ -176,65 +240,47 @@ impl Cursor {
 
 #[derive(Debug, Clone)]
 struct FeedProtocol {
-    store: Store,
-    head: watch::Receiver<u64>,
-    watcher: Arc<Mutex<Watcher>>,
+    feed: Feed,
 }
 
 impl ProtocolHandler for FeedProtocol {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        let remote = conn.remote_id();
-        // Close the connection when the follower loses access, also while the
-        // server waits for its request or for a slow replay.
-        let allow_list = self.store.allow_list();
-        let guarded = conn.clone();
-        let _guard = AbortOnDropHandle::new(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(ACCESS_CHECK).await;
-                if !allow_list.contains(&remote) {
-                    guarded.close(VarInt::from_u32(DENIED_CODE), DENIED_REASON);
-                    return;
-                }
-            }
-        }));
-        let (mut send, mut recv) = conn.accept_bi().await?;
-        if let Err(e) = self.serve(&mut send, &mut recv, remote).await {
-            tracing::debug!("{remote}: {e:#}");
-            if e.downcast_ref::<Revoked>().is_some() {
-                // The follower reads this code as "denied" and does not reconnect.
-                conn.close(VarInt::from_u32(DENIED_CODE), DENIED_REASON);
-                return Ok(());
-            }
-            let frame = Frame::Error {
-                message: format!("{e:#}"),
-            };
-            proto::write_frame(&mut send, &frame, proto::MAX_FRAME)
-                .await
-                .ok();
-        }
-        send.finish().ok();
+        let (send, recv) = conn.accept_bi().await?;
+        self.feed.answer(&conn, send, recv, None).await;
         // The follower closes the connection after it reads the last frame.
         tokio::time::timeout(LINGER, conn.closed()).await.ok();
         Ok(())
     }
 }
 
-impl FeedProtocol {
+impl Feed {
     async fn serve(
         &self,
         send: &mut SendStream,
-        recv: &mut RecvStream,
+        mut recv: RecvStream,
         remote: EndpointId,
+        acks: Option<watch::Sender<Stored>>,
     ) -> Result<()> {
-        let req: Request =
-            tokio::time::timeout(REQUEST_TIMEOUT, proto::read_frame(recv, proto::MAX_REQUEST))
-                .await
-                .context("the follower sent no request in time")??
-                .context("no request")?;
+        let req: Request = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            proto::read_frame(&mut recv, proto::MAX_REQUEST),
+        )
+        .await
+        .context("the follower sent no request in time")??
+        .context("no request")?;
         tracing::debug!("request {req:?}");
         if !self.store.allow_list().contains(&remote) {
             return Err(Revoked.into());
         }
+        let _acks = acks.map(|acks| {
+            AbortOnDropHandle::new(tokio::spawn(async move {
+                while let Ok(Some(stored)) =
+                    proto::read_frame::<Stored>(&mut recv, proto::MAX_REQUEST).await
+                {
+                    acks.send_replace(stored);
+                }
+            }))
+        });
         // Include every entry that is on disk now, not only the entries that
         // the last poll saw.
         self.watcher.lock().await.sync().await?;

@@ -50,6 +50,18 @@ pub fn random_id() -> String {
     crate::choices::random_id()
 }
 
+/// Take the lock `name` in `dir` without waiting. `None` means that another
+/// process holds it.
+pub fn try_lock(dir: &Path, name: &str) -> Result<Option<fs::File>> {
+    store::create_private_dir(dir)?;
+    let file = store::private_file(&dir.join(name))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 pub fn lock(dir: &Path, name: &str) -> Result<fs::File> {
     store::create_private_dir(dir)?;
     let file = store::private_file(&dir.join(name))?;

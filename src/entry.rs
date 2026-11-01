@@ -299,8 +299,8 @@ impl Entry {
         let bytes = data_encoding::HEXLOWER
             .decode(sig.as_bytes())
             .map_err(|_| BadSignature { id: self.id })?;
-        let signature =
-            iroh::Signature::try_from(bytes.as_slice()).map_err(|_| BadSignature { id: self.id })?;
+        let signature = iroh::Signature::try_from(bytes.as_slice())
+            .map_err(|_| BadSignature { id: self.id })?;
         let unsigned = Entry {
             sig: None,
             ..self.clone()

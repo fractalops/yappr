@@ -5,6 +5,7 @@
 pub mod choices;
 pub mod client;
 pub mod control;
+pub mod deliver;
 pub mod entry;
 pub mod health;
 pub mod net;

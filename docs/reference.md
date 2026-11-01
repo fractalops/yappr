@@ -27,7 +27,7 @@ Commands operate on the selected local feed unless they name a writer.
 | `ask DEVICE QUESTION --choice VALUE...` | Create a question and wait for a choice |
 | `approve DEVICE QUESTION` | Create an approval request and wait for a decision |
 | `wait ID`, `cancel ID` | Wait for the result of a local question, or cancel it |
-| `answer WRITER ID VALUE`, `retry` | Submit an answer, or resend queued submissions |
+| `answer WRITER ID VALUE`, `retry` | Submit an answer, or resend queued submissions and deliver the feed |
 | `pair`, `join CODE` | Invite a device, or request access with a pairing code |
 | `allow DEVICE`, `deny DEVICE` | Grant or revoke read access |
 | `alias set NAME ID_OR_TICKET`, `alias remove NAME` | Save or remove a local device name |
@@ -69,6 +69,12 @@ yappr post --source ci --kind deploy.finished --subject deploy/web \
 
 Without `--body`, `post` reads stdin until EOF and saves one entry. It works without a running `serve` process.
 Use `--json` for one entry per JSON input line.
+
+### Delivery
+
+A device that receives entries, such as the app, gives its address when it pairs. The writer then opens the connection and delivers the feed to that device.
+A running `serve` delivers each new entry. Without `serve`, `post` delivers the new entries itself and waits up to 20 seconds for each device to confirm them.
+If a device does not confirm, the entry stays in the feed, and `post` returns 5. The next delivery from `serve`, `post`, or `retry` sends it.
 
 ```json
 {"v":1,"id":42,"time":"2026-10-27T09:30:00Z","source":"ci","kind":"deploy.finished","level":"info","subject":"deploy/web","title":"Deployed web","body":"v1.4.2 is live.","data":{"version":"1.4.2"}}
@@ -196,7 +202,8 @@ yappr ask phone "Backup failed. What next?" --choice retry="Retry now" --choice 
 yappr approve phone "Deploy to production?" --timeout 20m
 ```
 
-Both commands create a local question for one allowed responder. The writer must be serving for that responder to read and answer.
+Both commands create a local question for one allowed responder. A responder that reads the feed needs a running `serve` to read and answer.
+A responder that receives the feed gets the question from `ask` or `approve` while they wait, and answers on that connection.
 `--to DEVICE` and `--title QUESTION` can replace the positional arguments.
 Both accept `--body`, `--source`, `--level`, `--subject`, `--data`, and `--markdown`.
 `--timeout DURATION` sets the deadline. Default: `10m`.
@@ -251,11 +258,12 @@ A CLI reader joins with `yappr join CODE --name NAME [--alias NAME]`.
 Here, `--name` names the joining device and `--alias` names the writer locally.
 Acceptance must occur before expiry. The claiming device can retrieve the result for two minutes after the deadline.
 `init` keeps serving after pairing ends, including expiry or rejection.
+A device that receives entries, such as the app, gives its address with its request. After acceptance, the writer delivers its feed to that address. See [Delivery](#delivery).
 
 Aliases name devices locally. They do not grant read access.
 An alias holding only an ID depends on address discovery. Save a ticket to retain explicit addresses.
 Remove an alias before assigning it to another identity.
-`status` lists peers. Its read-access flag describes access to this local feed.
+`status` lists peers. Its read-access flag describes access to this local feed. Its receive flag shows the devices that get deliveries.
 
 Allow-list changes apply without restarting. `deny` closes active feed connections within five seconds.
 The writer checks access on each answer. Unknown devices can reach pairing only while an invitation is pending.
@@ -269,7 +277,7 @@ The writer checks access on each answer. Unknown devices can reach pairing only 
 | 2 | Usage error |
 | 3 | Writer denied access |
 | 4 | Invalid entry, question, or choice |
-| 5 | Writer unreachable |
+| 5 | Writer unreachable, or a receiving device did not confirm a new entry |
 | 6 | Question expired |
 | 7 | Approval rejected |
 | 8 | Question cancelled, or creation interrupted while waiting |

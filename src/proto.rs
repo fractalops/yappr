@@ -218,6 +218,14 @@ pub enum Frame {
     Unknown,
 }
 
+/// The receiver of a delivery saved the entries that it asked for, up to
+/// entry `through` of the log `log`. It sends this frame after its request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stored {
+    pub log: Option<String>,
+    pub through: u64,
+}
+
 /// Write one length-prefixed JSON frame.
 pub async fn write_frame<T: Serialize>(
     w: &mut (impl AsyncWrite + Unpin),

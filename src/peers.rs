@@ -11,6 +11,9 @@ use crate::{disk, EndpointTicket};
 pub struct Peer {
     pub id: EndpointId,
     pub ticket: Option<String>,
+    /// This machine delivers its entries to the device at `ticket`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub receives: bool,
 }
 
 pub fn validate_alias(alias: &str) -> Result<()> {
@@ -73,6 +76,7 @@ pub fn set(dir: &Path, alias: &str, target: &str) -> Result<()> {
         Peer {
             id: ticket.endpoint_addr().id,
             ticket: Some(ticket.to_string()),
+            receives: false,
         }
     } else {
         Peer {
@@ -80,6 +84,7 @@ pub fn set(dir: &Path, alias: &str, target: &str) -> Result<()> {
                 .parse()
                 .context("use a full device ID or feed ticket")?,
             ticket: None,
+            receives: false,
         }
     };
     let _lock = disk::lock(dir, "peers.lock")?;
@@ -89,11 +94,48 @@ pub fn set(dir: &Path, alias: &str, target: &str) -> Result<()> {
             bail!("alias {alias:?} belongs to another device. Remove the alias before assigning a different device");
         }
     }
-    let ticket = peer
-        .ticket
-        .or_else(|| peers.get(alias).and_then(|p| p.ticket.clone()));
-    peers.insert(alias.into(), Peer { ticket, ..peer });
+    let old = peers.get(alias);
+    let ticket = peer.ticket.or_else(|| old.and_then(|p| p.ticket.clone()));
+    let receives = old.is_some_and(|p| p.receives);
+    peers.insert(
+        alias.into(),
+        Peer {
+            ticket,
+            receives,
+            ..peer
+        },
+    );
     disk::write(&dir.join("peers.json"), &peers)
+}
+
+/// Save `ticket` as the address of `alias`, and deliver this machine's
+/// entries to it.
+pub fn set_receiver(dir: &Path, alias: &str, ticket: &EndpointTicket) -> Result<()> {
+    set(dir, alias, &ticket.to_string())?;
+    let _lock = disk::lock(dir, "peers.lock")?;
+    let mut peers = list(dir)?;
+    if let Some(peer) = peers.get_mut(alias) {
+        peer.receives = true;
+    }
+    disk::write(&dir.join("peers.json"), &peers)
+}
+
+/// The devices that receive this machine's entries, with their addresses.
+pub fn receivers(dir: &Path) -> Result<Vec<(String, EndpointAddr)>> {
+    let mut out = Vec::new();
+    for (alias, peer) in list(dir)? {
+        if !peer.receives {
+            continue;
+        }
+        let Some(ticket) = peer.ticket else { continue };
+        let ticket: EndpointTicket = ticket
+            .parse()
+            .context("the saved peer ticket is not valid")?;
+        if ticket.endpoint_addr().id == peer.id {
+            out.push((alias, ticket.endpoint_addr().clone()));
+        }
+    }
+    Ok(out)
 }
 
 pub fn remove(dir: &Path, alias: &str) -> Result<()> {

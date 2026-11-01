@@ -279,6 +279,7 @@ async fn pairing_needs_writer_confirmation_and_binds_one_identity() {
     let join = Join {
         token: invitation.token.clone(),
         name: "My device".into(),
+        ticket: None,
     };
     let pending: PairReply = control::exchange(&device, server.addr().await, pairing::ALPN, &join)
         .await
@@ -304,6 +305,7 @@ async fn pairing_needs_writer_confirmation_and_binds_one_identity() {
         &Join {
             token: disk::random_id(),
             name: "Device".into(),
+            ticket: None,
         },
     )
     .await
@@ -326,6 +328,7 @@ async fn unknown_devices_reach_pairing_only_while_an_invitation_is_open() {
     let join = |token: &str| Join {
         token: token.into(),
         name: "Device".into(),
+        ticket: None,
     };
     let closed = control::exchange::<_, PairReply>(
         &stranger,
@@ -395,7 +398,8 @@ fn expired_and_rejected_invitations_do_not_grant_access() {
         device,
         Join {
             token: expired.token,
-            name: "Device".into()
+            name: "Device".into(),
+            ticket: None,
         }
     )
     .is_err());
@@ -414,6 +418,7 @@ fn expired_and_rejected_invitations_do_not_grant_access() {
         Join {
             token: invite.token.clone(),
             name: "Device".into(),
+            ticket: None,
         },
     )
     .unwrap();
@@ -424,7 +429,8 @@ fn expired_and_rejected_invitations_do_not_grant_access() {
             device,
             Join {
                 token: invite.token,
-                name: "Device".into()
+                name: "Device".into(),
+                ticket: None,
             }
         )
         .unwrap()

@@ -27,6 +27,8 @@ const LINGER: Duration = Duration::from_secs(10);
 const BATCH: usize = 256;
 /// How often each connection checks that its follower is still allowed.
 const ACCESS_CHECK: Duration = Duration::from_secs(1);
+/// How long the server waits for its connections to close when it stops.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a follower has to send its request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -90,8 +92,13 @@ impl Server {
     }
 
     /// Stop the server.
+    /// Stop the server. Deliveries stop first, then the endpoint closes its
+    /// connections for at most [`SHUTDOWN_TIMEOUT`].
     pub async fn shutdown(self) {
-        self.router.shutdown().await.ok();
+        drop(self._deliveries);
+        tokio::time::timeout(SHUTDOWN_TIMEOUT, self.router.shutdown())
+            .await
+            .ok();
     }
 }
 

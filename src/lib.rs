@@ -20,6 +20,8 @@ pub mod cursor;
 #[cfg(not(wasm_browser))]
 pub mod disk;
 #[cfg(not(wasm_browser))]
+pub mod hooks;
+#[cfg(not(wasm_browser))]
 pub mod ingest;
 #[cfg(not(wasm_browser))]
 pub mod outbox;

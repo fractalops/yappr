@@ -955,8 +955,15 @@ async fn start(common: &CommonArgs, args: StartArgs, pairing: Pairing) -> Result
     let first = store.allow_list().load()?.is_empty();
     if pairing == Pairing::Always || (pairing == Pairing::First && first) {
         let name = args.name.unwrap_or_else(hostname);
-        let outcome =
-            pairing_session(&store, ticket.to_string(), name, args.expires, args.alias).await?;
+        let outcome = pairing_session(
+            common,
+            &store,
+            ticket.to_string(),
+            name,
+            args.expires,
+            args.alias,
+        )
+        .await?;
         match outcome {
             PairOutcome::Interrupted => {
                 server.shutdown().await;
@@ -2018,7 +2025,7 @@ async fn pair(common: &CommonArgs, args: PairArgs) -> Result<()> {
     let ticket: Option<String> = disk::read(&store.dir().join("endpoint.json"))?;
     let ticket = ticket.context("run \"yappr start\" before you create an invitation")?;
     let name = args.name.unwrap_or_else(hostname);
-    match pairing_session(&store, ticket, name, args.expires, args.alias).await? {
+    match pairing_session(common, &store, ticket, name, args.expires, args.alias).await? {
         PairOutcome::Expired => bail!("the pairing invitation expired"),
         _ => Ok(()),
     }
@@ -2038,6 +2045,7 @@ enum PairOutcome {
 /// device. A terminal asks to accept the device. Without a terminal, the
 /// writer accepts with "pair --accept".
 async fn pairing_session(
+    common: &CommonArgs,
     store: &Store,
     ticket: String,
     name: String,
@@ -2068,7 +2076,15 @@ async fn pairing_session(
                     None => peers::alias_for(store.dir(), &candidate.name, candidate.id)?,
                 };
                 match &candidate.ticket {
-                    Some(ticket) => peers::set_receiver(store.dir(), &alias, &ticket.parse()?)?,
+                    Some(ticket) => {
+                        // Keep the device's id and the relays of this machine
+                        // only, so that the device cannot choose hosts for
+                        // this machine to contact.
+                        let ticket: EndpointTicket = ticket.parse()?;
+                        let known = common.net(None)?.relays.relay_urls()?;
+                        let addr = net::known_relays_only(ticket.endpoint_addr(), &known);
+                        peers::set_receiver(store.dir(), &alias, &addr.into())?
+                    }
                     None => peers::set(store.dir(), &alias, &candidate.id.to_string())?,
                 }
                 eprintln!("Paired. The device is \"{alias}\" on this machine.");

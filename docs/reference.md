@@ -257,7 +257,7 @@ A CLI reader joins with `yappr join CODE --name NAME [--alias NAME]`.
 Here, `--name` names the joining device and `--alias` names the writer locally.
 Acceptance must occur before expiry. The claiming device can retrieve the result for two minutes after the deadline.
 `start` keeps serving after pairing ends, including expiry or rejection.
-A device that receives entries, such as the app, gives its address with its request. After acceptance, the writer delivers its feed to that address. See [Delivery](#delivery).
+A device that receives entries, such as the app, gives its address with its request. After acceptance, the writer delivers its feed to that address. It keeps only the device ID and the relays that the writer uses itself, so the device cannot choose other hosts for the writer to contact. See [Delivery](#delivery).
 
 Aliases name devices locally. They do not grant read access.
 An alias holding only an ID depends on address discovery. Save a ticket to retain explicit addresses.

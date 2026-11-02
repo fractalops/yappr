@@ -98,9 +98,18 @@ impl RelaySettings {
     /// The relay mode of these settings: the n0 relays or the custom relays,
     /// with each URL as [`without_trailing_dot`] gives it.
     fn relay_mode(&self) -> Result<RelayMode> {
+        Ok(match self.disabled {
+            true => RelayMode::Disabled,
+            false => RelayMode::Custom(RelayMap::from_iter(self.relay_urls()?)),
+        })
+    }
+
+    /// The relays of these settings, as [`without_trailing_dot`] gives them.
+    /// Disabled relays give none.
+    pub fn relay_urls(&self) -> Result<Vec<RelayUrl>> {
         self.validate()?;
         if self.disabled {
-            return Ok(RelayMode::Disabled);
+            return Ok(Vec::new());
         }
         let urls: Vec<RelayUrl> = if self.urls.is_empty() {
             iroh::defaults::prod::default_relay_map().urls()
@@ -110,9 +119,7 @@ impl RelaySettings {
                 .map(|s| s.parse())
                 .collect::<Result<_, _>>()?
         };
-        Ok(RelayMode::Custom(RelayMap::from_iter(
-            urls.iter().map(without_trailing_dot),
-        )))
+        Ok(urls.iter().map(without_trailing_dot).collect())
     }
 }
 
@@ -143,6 +150,18 @@ fn without_trailing_dot(url: &RelayUrl) -> RelayUrl {
             .unwrap_or_else(|_| url.clone()),
         _ => url.clone(),
     }
+}
+
+/// The address of a device that another device gave: its id, and only the
+/// relays in `known`. This machine then contacts no host that the other
+/// device chose. It finds direct paths by itself.
+pub fn known_relays_only(addr: &EndpointAddr, known: &[RelayUrl]) -> EndpointAddr {
+    let relays = addr
+        .relay_urls()
+        .map(without_trailing_dot)
+        .filter(|url| known.contains(url))
+        .map(iroh::TransportAddr::Relay);
+    EndpointAddr::from_parts(addr.id, relays)
 }
 
 /// `addr` with relay URLs in the form that every endpoint uses. See
@@ -266,6 +285,20 @@ mod tests {
             relay_addr(addr).relay_urls().next().unwrap().to_string(),
             "https://relay.example.com/"
         );
+    }
+
+    #[test]
+    fn a_given_address_keeps_only_the_known_relays() {
+        let known = RelaySettings::default().relay_urls().unwrap();
+        let addr = EndpointAddr::new(SecretKey::generate().public())
+            .with_relay_url(known[0].clone())
+            .with_relay_url("http://192.168.1.1/admin".parse().unwrap())
+            .with_ip_addr("192.168.1.1:80".parse().unwrap());
+        let kept = known_relays_only(&addr, &known);
+        assert_eq!(kept.id, addr.id);
+        assert_eq!(kept.relay_urls().collect::<Vec<_>>(), [&known[0]]);
+        assert_eq!(kept.ip_addrs().count(), 0);
+        assert!(known_relays_only(&addr, &[]).addrs.is_empty());
     }
 
     #[test]

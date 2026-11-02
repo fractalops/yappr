@@ -25,9 +25,21 @@ and answer questions. After installing the CLI on your computer, run
 
 ## Install
 
+On macOS or Linux:
+
 ```sh
-cargo install --git https://github.com/fractalops/yappr
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/fractalops/yappr/releases/latest/download/yappr-installer.sh | sh
 ```
+
+On Windows, in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/fractalops/yappr/releases/latest/download/yappr-installer.ps1 | iex"
+```
+
+The installer puts `yappr` in `~/.cargo/bin`. To update, run it again.
+The [releases page](https://github.com/fractalops/yappr/releases) also has the archives for each platform.
+To build from source, use `cargo install --git https://github.com/fractalops/yappr --tag v0.1.0`.
 
 ## Start with `yappr start`
 

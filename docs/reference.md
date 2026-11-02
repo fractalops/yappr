@@ -382,7 +382,7 @@ esac
 | `--no-relay` | | Relays enabled |
 
 Feeds use `$XDG_DATA_HOME/yappr/FEED/` or the platform data directory. `--dir` overrides feed selection.
-The identity persists in `secret.key`. `IROH_SECRET` overrides that key.
+The private key persists in `secret.key`. `YAPPR_KEY` overrides that key. The older name `IROH_SECRET` also works.
 
 ```sh
 yappr network show

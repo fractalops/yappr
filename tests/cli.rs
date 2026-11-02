@@ -35,6 +35,7 @@ impl Machine {
             .env("YAPPR_DIR", self.dir.path())
             .env("YAPPR_NETWORK", "local")
             .env_remove("IROH_SECRET")
+            .env_remove("YAPPR_KEY")
             .env_remove("NO_COLOR")
             .env_remove("RUST_LOG")
     }
@@ -119,6 +120,7 @@ impl Machine {
             .env("YAPPR_DIR", self.dir.path())
             .env("YAPPR_NETWORK", "local")
             .env_remove("IROH_SECRET")
+            .env_remove("YAPPR_KEY")
             .env_remove("NO_COLOR")
             .env_remove("RUST_LOG")
             .stdin(Stdio::null());

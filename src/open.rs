@@ -165,22 +165,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let me = iroh::SecretKey::generate().public();
-        let mut question = choices::new_question(
-            "Deploy?".into(),
-            String::new(),
-            "ci".into(),
-            choices::approval_options(),
-            me,
-            Some(Timestamp::now() + jiff::SignedDuration::from_millis(50)),
-            true,
-        );
-        question = choices::create(&store, question).unwrap();
-        assert_eq!(open_ids(&store, Some(me)).len(), 1);
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        assert!(open_ids(&store, Some(me)).is_empty());
+        let ask = |deadline: jiff::SignedDuration| {
+            let question = choices::new_question(
+                "Deploy?".into(),
+                String::new(),
+                "ci".into(),
+                choices::approval_options(),
+                me,
+                Some(Timestamp::now() + deadline),
+                true,
+            );
+            choices::create(&store, question).unwrap()
+        };
+        // Only the short deadline can pass during the test, also on a slow
+        // machine.
+        let short = ask(jiff::SignedDuration::from_millis(100));
+        ask(jiff::SignedDuration::from_hours(1));
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(open_ids(&store, Some(me)), [2]);
         assert_eq!(
             choices::id_of_entry(&store.entries().unwrap(), 1).unwrap(),
-            question.id
+            short.id
         );
     }
 }

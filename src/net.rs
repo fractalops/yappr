@@ -227,12 +227,20 @@ pub async fn addr(endpoint: &Endpoint) -> EndpointAddr {
     }
 }
 
-/// The secret key from `IROH_SECRET`, or from `<dir>/secret.key`. Create the
-/// file if it does not exist.
+/// The environment variables that can hold the private key, in order. The
+/// second one is the older name.
+#[cfg(not(wasm_browser))]
+pub const KEY_VARS: [&str; 2] = ["YAPPR_KEY", "IROH_SECRET"];
+
+/// The private key from `YAPPR_KEY` or `IROH_SECRET`, or from
+/// `<dir>/secret.key`. Create the file if it does not exist.
 #[cfg(not(wasm_browser))]
 pub fn load_or_create_secret(dir: &Path) -> Result<SecretKey> {
-    if let Ok(secret) = std::env::var("IROH_SECRET") {
-        return SecretKey::from_str(secret.trim()).context("IROH_SECRET is not a valid secret key");
+    for var in KEY_VARS {
+        if let Ok(key) = std::env::var(var) {
+            return SecretKey::from_str(key.trim())
+                .with_context(|| format!("{var} is not a valid private key"));
+        }
     }
     let _lock = crate::disk::lock(dir, "identity.lock")?;
     let path = dir.join("secret.key");

@@ -107,6 +107,74 @@ impl Invitation {
     }
 }
 
+/// The public key and the name of a machine that a device allows without
+/// pairing, such as a CI job. A device that scans the code then takes
+/// deliveries from that key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineCode {
+    pub id: EndpointId,
+    pub name: String,
+}
+
+/// The start of a machine code. Like a pairing code, it uses only capital
+/// letters, digits, a hyphen, and a colon, for the QR alphanumeric mode.
+const MACHINE_PREFIX: &str = "YAPPR-MACHINE:";
+/// The version of the binary layout inside a machine code.
+const MACHINE_VERSION: u8 = 1;
+
+impl MachineCode {
+    /// The machine code: `YAPPR-MACHINE:` and the base32 of this layout:
+    /// version (1 byte), public key (32 bytes), name length (1 byte), name.
+    pub fn encode(&self) -> Result<String> {
+        if self.name.trim().is_empty()
+            || self.name.len() > MAX_NAME
+            || self.name.chars().any(char::is_control)
+        {
+            bail!("use a machine name of 1 to {MAX_NAME} bytes on one line");
+        }
+        let mut bytes = vec![MACHINE_VERSION];
+        bytes.extend(self.id.as_bytes());
+        bytes.push(self.name.len() as u8);
+        bytes.extend(self.name.as_bytes());
+        Ok(format!(
+            "{MACHINE_PREFIX}{}",
+            data_encoding::BASE32_NOPAD.encode(&bytes)
+        ))
+    }
+
+    pub fn decode(text: &str) -> Result<Self> {
+        if text.len() > 512 {
+            bail!("the machine code is too long");
+        }
+        let text = text.trim().to_ascii_uppercase();
+        let encoded = text
+            .strip_prefix(MACHINE_PREFIX)
+            .context("use a Yappr machine code. It starts with YAPPR-MACHINE:")?;
+        let invalid = || anyhow::anyhow!("the machine code is not valid");
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(encoded.as_bytes())
+            .map_err(|_| invalid())?;
+        let (&version, rest) = bytes.split_first().ok_or_else(invalid)?;
+        if version != MACHINE_VERSION {
+            bail!("the machine code has version {version}. Update Yappr to read it");
+        }
+        let (key, rest) = rest.split_at_checked(32).ok_or_else(invalid)?;
+        let (&len, name) = rest.split_first().ok_or_else(invalid)?;
+        if name.len() != len as usize {
+            return Err(invalid());
+        }
+        let name = String::from_utf8(name.to_vec()).map_err(|_| invalid())?;
+        if name.trim().is_empty() || name.chars().any(char::is_control) {
+            return Err(invalid());
+        }
+        let key: [u8; 32] = key.try_into().map_err(|_| invalid())?;
+        Ok(Self {
+            id: EndpointId::from_bytes(&key).map_err(|_| invalid())?,
+            name,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: EndpointId,
@@ -391,6 +459,27 @@ mod tests {
             .candidate
             .unwrap();
         assert_eq!(candidate.ticket, join_with(phone).ticket);
+    }
+
+    #[test]
+    fn a_machine_code_round_trips_and_rejects_damage() {
+        let code = MachineCode {
+            id: iroh::SecretKey::generate().public(),
+            name: "CI deploys".into(),
+        };
+        let text = code.encode().unwrap();
+        assert!(text.starts_with("YAPPR-MACHINE:"));
+        assert!(text
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b':' || b == b'-'));
+        assert_eq!(MachineCode::decode(&text.to_lowercase()).unwrap(), code);
+        assert!(MachineCode::decode(&text[..text.len() - 4]).is_err());
+        assert!(MachineCode::decode(&invitation().encode().unwrap()).is_err());
+        let bad = MachineCode {
+            name: "a\u{1b}b".into(),
+            ..code
+        };
+        assert!(bad.encode().is_err());
     }
 
     #[test]

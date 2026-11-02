@@ -182,6 +182,7 @@ async fn writer_error_does_not_send_terminal_controls_to_stderr() {
             .env("YAPPR_DIR", path)
             .env("YAPPR_NETWORK", "local")
             .env_remove("IROH_SECRET")
+            .env_remove("YAPPR_KEY")
             .env_remove("RUST_LOG")
             .output()
             .unwrap()
@@ -435,6 +436,7 @@ fn device_aliases_for_one_identity_report_the_same_access() {
         .env("YAPPR_DIR", dir.path())
         .env("YAPPR_NETWORK", "local")
         .env_remove("IROH_SECRET")
+        .env_remove("YAPPR_KEY")
         .env_remove("RUST_LOG")
         .output()
         .unwrap();
@@ -461,6 +463,7 @@ fn several_writer_json_output_is_valid_post_json_input() {
         .env("YAPPR_DIR", dir.path())
         .env("YAPPR_NETWORK", "local")
         .env_remove("IROH_SECRET")
+        .env_remove("YAPPR_KEY")
         .env_remove("RUST_LOG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

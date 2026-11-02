@@ -101,6 +101,11 @@ esac
 `ask` prints the selected value, such as `retry`. The script stops if the
 question expires, you cancel it, or an error occurs.
 
+### Ask from a CI job
+
+A CI job can ask your phone with its own key, without pairing. See
+[CI jobs](docs/reference.md#ci-jobs-and-other-machines-without-pairing).
+
 ## Everyday use
 
 - Leave `yappr start` running. It sends each new entry to your devices, and a device that was offline gets the entries it missed.

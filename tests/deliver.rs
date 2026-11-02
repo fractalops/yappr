@@ -371,15 +371,28 @@ async fn a_running_writer_delivers_new_entries_to_its_receivers() {
 
 /// Run the built binary with the feed in `dir`, on loopback.
 async fn yappr(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_yappr"))
+    yappr_with_key(dir, None, args).await
+}
+
+/// Run the built binary with the private key `key` in YAPPR_KEY, as a CI job
+/// does.
+async fn yappr_with_key(
+    dir: &std::path::Path,
+    key: Option<&str>,
+    args: &[&str],
+) -> std::process::Output {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_yappr"));
+    command
         .args(args)
         .env("YAPPR_DIR", dir)
         .env("YAPPR_NETWORK", "local")
         .env_remove("IROH_SECRET")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .unwrap()
+        .env_remove("YAPPR_KEY")
+        .stdin(std::process::Stdio::null());
+    if let Some(key) = key {
+        command.env("YAPPR_KEY", key);
+    }
+    command.output().await.unwrap()
 }
 
 /// A feed directory with a device that receives its entries.
@@ -494,4 +507,109 @@ async fn text_from_another_endpoint_reaches_the_terminal_escaped() {
         !stderr.contains('\u{1b}') && !stderr.contains('\u{7}'),
         "{stderr:?}"
     );
+}
+
+/// A CI job with its own key reaches a device that allowed that key, with no
+/// pairing: the flow of `yappr key` and `allow --receives`.
+#[tokio::test]
+async fn a_ci_job_with_a_key_asks_a_device_that_allowed_the_key() {
+    let laptop = tempfile::tempdir().unwrap();
+    let out = yappr(
+        laptop.path(),
+        &["key", "--name", "CI deploys", "--output", "json"],
+    )
+    .await;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let key: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let public: EndpointId = key["public_key"].as_str().unwrap().parse().unwrap();
+    let code = yappr::pairing::MachineCode::decode(key["machine_code"].as_str().unwrap()).unwrap();
+    assert_eq!((code.id, code.name.as_str()), (public, "CI deploys"));
+
+    // The device allows the public key of the job, as the app does after a scan.
+    let mut device = Device::start(public).await;
+    let address = EndpointTicket::new(device.addr().await).to_string();
+
+    // A fresh feed directory for each run, as on a CI runner.
+    let ci = tempfile::tempdir().unwrap();
+    let private = key["private_key"].as_str().unwrap();
+    let allowed = yappr_with_key(
+        ci.path(),
+        Some(private),
+        &["allow", &address, "--alias", "phone", "--receives"],
+    )
+    .await;
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    let id = yappr_with_key(ci.path(), Some(private), &["id"]).await;
+    assert_eq!(
+        String::from_utf8(id.stdout).unwrap().trim(),
+        public.to_string()
+    );
+
+    let path = ci.path().to_owned();
+    let private = private.to_string();
+    let asking = tokio::spawn(async move {
+        yappr_with_key(
+            &path,
+            Some(&private),
+            &["approve", "phone", "Deploy v1.4.2?"],
+        )
+        .await
+    });
+    let entry = device.wait_for(1).await.remove(0);
+    let question = choices::question(&entry).expect("a question entry");
+    let conn = device.last.borrow().clone().unwrap();
+    let reply: control::Reply = control::exchange_on(
+        &conn,
+        &control::Request::Submit {
+            submission: Submission {
+                id: choices::random_id(),
+                question_id: question.id,
+                value: "approve".into(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(reply, control::Reply::Accepted { .. }),
+        "{reply:?}"
+    );
+    let out = timeout(WAIT, asking).await.unwrap().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+async fn key_prints_env_lines_with_the_address_of_a_paired_device() {
+    let (dir, device) = cli_writer().await;
+    let out = yappr(dir.path(), &["key", "--for", "phone", "--output", "env"]).await;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    let key = lines[0].strip_prefix("YAPPR_KEY=").unwrap();
+    assert!(key.parse::<SecretKey>().is_ok());
+    let address: EndpointTicket = lines[1]
+        .strip_prefix("YAPPR_PHONE=")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(address.endpoint_addr().id, device.endpoint.id());
+    let unknown = yappr(dir.path(), &["key", "--for", "tablet"]).await;
+    assert!(!unknown.status.success());
 }

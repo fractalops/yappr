@@ -37,8 +37,8 @@ const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
 /// is no account or hosted feed service. A device that reads the feed gets
 /// the entries that it missed, and with --follow, the new entries.
 ///
-/// The identity of this machine is in <feed dir>/secret.key. Set IROH_SECRET to
-/// use a different secret key.
+/// The private key of this machine is in <feed dir>/secret.key. Set YAPPR_KEY
+/// to use a different private key, such as the key of a CI job.
 #[derive(Parser, Debug)]
 #[clap(version)]
 struct Args {
@@ -143,10 +143,37 @@ enum Commands {
     On(OnArgs),
 
     /// Let a device read this feed.
+    ///
+    /// Pairing allows a device too. With an address and --receives, allow
+    /// also delivers this feed to the device, as pairing does. A CI job uses
+    /// it to reach a phone without pairing.
+    #[clap(after_help = "Examples:
+  yappr allow phone
+  yappr allow \"$YAPPR_PHONE\" --alias phone --receives")]
     Allow {
-        /// The alias or endpoint ID of the device.
+        /// The alias, endpoint ID, or address (ticket) of the device.
+        #[clap(value_name = "DEVICE")]
         id: String,
+        /// Save the device under this alias.
+        #[clap(long)]
+        alias: Option<String>,
+        /// Deliver this feed to the device. The device needs an address.
+        #[clap(long)]
+        receives: bool,
     },
+
+    /// Create a key for a machine that a device allows without pairing,
+    /// such as a CI job.
+    ///
+    /// Prints the private key once, for the machine's secret store as
+    /// YAPPR_KEY, and shows a code that the app scans to allow the public
+    /// key. With --for, it also prints the address of a paired device, so
+    /// that the machine can deliver to it. This computer does not keep the
+    /// key.
+    #[clap(after_help = "Examples:
+  yappr key --name \"CI deploys\" --for phone
+  yappr key --name ci --for phone --output env")]
+    Key(KeyArgs),
 
     /// Stop a device from reading this feed.
     Deny {
@@ -368,6 +395,26 @@ struct ApprovalArgs {
     #[clap(flatten)]
     question: QuestionArgs,
 }
+#[derive(clap::Args, Debug)]
+struct KeyArgs {
+    /// The name that the app shows for the machine.
+    #[clap(long, default_value = "CI")]
+    name: String,
+    /// A paired device, such as phone, whose address the machine needs.
+    #[clap(long = "for", value_name = "DEVICE")]
+    device: Option<String>,
+    /// text for people, env for KEY=value lines, json for programs.
+    #[clap(long, value_enum, default_value_t = KeyOutput::Text)]
+    output: KeyOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum KeyOutput {
+    Text,
+    Env,
+    Json,
+}
+
 #[derive(clap::Args, Debug)]
 struct StartArgs {
     /// Pair a device, also when other devices can read the feed.
@@ -1575,8 +1622,26 @@ async fn probe(common: &CommonArgs, target: &str, text: bool) -> Result<()> {
     result
 }
 
-fn allow(common: &CommonArgs, target: String) -> Result<()> {
-    let id = peers::resolve(&common.dir()?, &target)?.id;
+fn allow(common: &CommonArgs, target: String, alias: Option<String>, receives: bool) -> Result<()> {
+    let dir = common.dir()?;
+    if let Some(alias) = &alias {
+        peers::set(&dir, alias, &target)?;
+    }
+    if receives {
+        let alias = alias
+            .or_else(|| {
+                peers::validate_alias(&target)
+                    .is_ok()
+                    .then(|| target.clone())
+            })
+            .ok_or_else(|| Usage("give --alias NAME with --receives".into()))?;
+        let ticket = peers::list(&dir)?
+            .remove(&alias)
+            .and_then(|peer| peer.ticket)
+            .with_context(|| format!("{alias} has no address. Give its address (ticket)"))?;
+        peers::set_receiver(&dir, &alias, &ticket.parse()?)?;
+    }
+    let id = peers::resolve(&dir, &target)?.id;
     let list = common.store()?.allow_list();
     if list.allow(id)? {
         eprintln!("allowed {id}");
@@ -1584,6 +1649,74 @@ fn allow(common: &CommonArgs, target: String) -> Result<()> {
         eprintln!("{id} is already allowed");
     }
     Ok(())
+}
+
+/// Create a key pair for a machine such as a CI job, and print what the
+/// machine and the app need.
+fn key(common: &CommonArgs, args: KeyArgs) -> Result<()> {
+    let secret = iroh::SecretKey::generate();
+    let code = pairing::MachineCode {
+        id: secret.public(),
+        name: args.name.clone(),
+    }
+    .encode()
+    .map_err(|e| Usage(format!("{e:#}")))?;
+    let private = data_encoding::HEXLOWER.encode(&secret.to_bytes());
+    let device = match &args.device {
+        Some(alias) => {
+            let peer = peers::list(&common.dir()?)?
+                .remove(alias)
+                .with_context(|| format!("unknown device alias {alias:?}. Pair it first"))?;
+            let ticket = peer.ticket.with_context(|| {
+                format!("this machine has no address for {alias}. Pair it first")
+            })?;
+            Some((alias.clone(), ticket))
+        }
+        None => None,
+    };
+    // The variable for the address of the device: phone gives YAPPR_PHONE.
+    let var = |alias: &str| format!("YAPPR_{}", alias.to_ascii_uppercase().replace('-', "_"));
+    match args.output {
+        KeyOutput::Text => {
+            println!(
+                "Private key. Keep it secret, and store it in your CI as YAPPR_KEY:\n{private}\n"
+            );
+            println!("Public key:\n{}\n", secret.public());
+            if let Some((alias, ticket)) = &device {
+                println!(
+                    "Address of {alias}. Store it in your CI as {}:\n{ticket}\n",
+                    var(alias)
+                );
+            }
+            println!("Machine code:\n{code}");
+        }
+        KeyOutput::Env => {
+            println!("YAPPR_KEY={private}");
+            if let Some((alias, ticket)) = &device {
+                println!("{}={ticket}", var(alias));
+            }
+        }
+        KeyOutput::Json => {
+            let device = device
+                .as_ref()
+                .map(|(alias, ticket)| serde_json::json!({"alias": alias, "address": ticket}));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "private_key": private,
+                    "public_key": secret.public(),
+                    "name": args.name,
+                    "machine_code": code,
+                    "device": device,
+                })
+            );
+        }
+    }
+    eprintln!(
+        "To allow {:?}, scan this code in the Yappr app: Setup, then Scan QR.",
+        yappr::proto::printable(&args.name)
+    );
+    print_qr(&code)
 }
 
 fn deny(common: &CommonArgs, target: String) -> Result<()> {
@@ -2294,7 +2427,12 @@ async fn run(args: Args) -> Result<()> {
                 _ = tokio::signal::ctrl_c() => Ok(()),
             }
         }
-        Commands::Allow { id } => allow(common, id),
+        Commands::Allow {
+            id,
+            alias,
+            receives,
+        } => allow(common, id, alias, receives),
+        Commands::Key(args) => key(common, args),
         Commands::Deny { id } => deny(common, id),
         Commands::Allowed => {
             for id in common.store()?.allow_list().load()? {

@@ -267,6 +267,81 @@ Remove an alias before assigning it to another identity.
 Allow-list changes apply without restarting. `deny` closes active feed connections within five seconds.
 The writer checks access on each answer. Unknown devices can reach pairing only while an invitation is pending.
 
+### When start must run
+
+Keep `yappr start` running so devices can catch up when they reconnect.
+A CLI reader needs it for live reads and confirmed answers.
+
+Without `start`, `post` can deliver entries to an open browser.
+`ask`, `approve`, and `wait` can deliver questions and receive answers while they wait.
+`retry` can deliver saved entries and resend queued answers.
+See [Delivery](#delivery) for confirmation timeouts and retry behavior.
+
+### Connect another CLI
+
+On the computer that writes the feed, create a pairing code:
+
+```sh
+yappr start --pair
+```
+
+Leave that terminal open. If `start` already runs, use `yappr pair` in another terminal instead.
+
+On the receiving computer, print its ID and join with that code:
+
+```sh
+yappr id
+yappr join YAPPR:... --name laptop --alias computer
+```
+
+Replace `YAPPR:...` with the code from the writing computer.
+Compare the receiving computer's ID with the ID in the writing computer's terminal.
+If they match, enter `y` in the writing computer's terminal.
+It saves the receiving device as `laptop`. The receiving device saves the writer as `computer`.
+
+On the receiving computer, read the feed and wait for new entries:
+
+```sh
+yappr read computer -f
+```
+
+In a second terminal on the writing computer, post an entry:
+
+```sh
+echo "Backup complete" | yappr post --source backup
+```
+
+The receiving computer prints the entry. It resumes after sleep or connection loss.
+To list open questions there, use `yappr read computer --open`.
+To answer entry 42, use `yappr answer computer 42 approve`.
+Transport failures leave queued answers for `yappr retry`.
+
+### Inspect and manage devices
+
+On the computer that writes the feed, inspect the paired devices and their access:
+
+```sh
+yappr status
+```
+
+Pairing grants access. To allow a known device separately, use:
+
+```sh
+yappr allow phone
+```
+
+To revoke that device's access, use:
+
+```sh
+yappr deny phone
+```
+
+On a receiving CLI, inspect the writer's connection without advancing its saved position:
+
+```sh
+yappr health computer
+```
+
 ## Exit codes
 
 | Code | Meaning |

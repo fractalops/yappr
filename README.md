@@ -3,25 +3,13 @@
 **Give your scripts and agents a way to reach you and get an answer.**
 
 Yappr brings updates, questions, and approval requests from your machines to
-your other devices. A script can wait for your reply before it continues. Each
-machine keeps its feed, so devices that were offline catch up when they
+other devices. A script can wait for your reply before it continues. Each
+machine keeps its feed, so devices that were offline can catch up when they
 reconnect.
 
-Your devices connect directly over iroh where possible. Otherwise, an iroh
-relay server forwards their end-to-end encrypted traffic. The relay cannot read
-your entries or answers, and it does not store your feed. You need no account
-or hosted feed service.
-
-```sh
-df -h / | yappr post --source disk --title "Disk usage"
-yappr approve laptop "Deploy to production?" && ./deploy
-```
-
-## Try it
-
-Open [yappr.run](https://yappr.run/) on your phone or computer to read feeds
-and answer questions. After installing the CLI on your computer, run
-[`yappr start`](#start-with-yappr-start) to pair the browser app.
+Your devices connect directly where possible. Otherwise, an iroh relay carries
+their end-to-end encrypted traffic. The relay cannot read your entries or
+answers, and it does not store your feed. You do not need an account.
 
 ## Install
 
@@ -41,132 +29,91 @@ The installer puts `yappr` in `~/.cargo/bin`. To update, run it again.
 The [releases page](https://github.com/fractalops/yappr/releases) also has the archives for each platform.
 To build from source, use `cargo install --git https://github.com/fractalops/yappr --tag v0.1.0`.
 
-## Start with `yappr start`
+## Connect your phone
 
-Start the feed and pair your first device:
+On your computer, start Yappr and leave this terminal open:
 
 ```sh
 yappr start
 ```
 
-<img src="docs/assets/start.gif" alt="yappr start shows a pairing code, accepts a laptop, and keeps serving the feed" width="800" />
+<img src="docs/assets/start.gif" alt="Yappr start shows a pairing code, accepts a device, and keeps the feed available" width="800" />
 
-`start` serves the feed. The first time, it shows QR and `YAPPR:` pairing codes, valid for five minutes.
+The first start shows a QR code and a `YAPPR:` code. They expire after five minutes.
 
-Scan the QR code at [yappr.run](https://yappr.run) on your phone, or join from a laptop:
+On your phone:
 
-```sh
-yappr id
-yappr join YAPPR:... --name laptop --alias server
-```
+1. Open [yappr.run](https://yappr.run/) and select **Setup**.
+2. Scan the QR code. You can also import a QR image or paste the `YAPPR:` code.
+3. Set **Your device name** to `phone`, then select **Request pairing**.
+4. Compare the device ID on your phone with the ID in the computer's terminal.
 
-Replace `YAPPR:...` with the code from the server.
-Check that the device ID on the server matches the ID on the joining device.
-Enter `y` on the server to grant access.
-The server saves the device name as an alias, such as `laptop`, and keeps serving.
+If the IDs match, enter `y` in that terminal. The computer prints the saved
+alias. The examples below use `phone`. Use the printed alias if it differs.
 
-On the laptop, read the feed and wait for new entries:
-
-```sh
-yappr read server -f
-```
-
-In a second terminal on the server, post an entry. It appears on the laptop:
+In a second terminal on the same computer, send your first update:
 
 ```sh
 echo "Backup complete" | yappr post --source backup
 ```
 
-Next time, `yappr start` serves the feed without a new pairing code.
-To pair another device while it runs, use `yappr pair` in a second terminal.
+The command prints an entry number. On your phone, select **Feed** to see
+**Backup complete**.
 
-## Examples
+To use a CLI on another computer, see [Connect another CLI](docs/reference.md#connect-another-cli).
 
-### Post a command's output
+## Updates, approvals, and choices
+
+Run these commands on the computer you paired with your phone.
+
+### Send a command's output
 
 ```sh
 df -h / | yappr post --source disk --title "Disk usage"
-uptime | yappr post --source server --title "Uptime"
 ```
 
-`post` reads stdin until it ends, then saves the output as one entry.
-Use it for a command's output or an individual event.
+`post` saves the command's output as one entry.
 
 ### Ask before a deploy
 
 ```sh
-if yappr approve laptop "Deploy to production?" --body "Commit abc123" --timeout 10m
+if yappr approve phone "Deploy to production?" --body "Commit abc123"
 then
   ./deploy abc123
 fi
 ```
 
-`approve` exits with 0 for approval, 7 for rejection, 6 for expiry, or 8 for
-cancellation. The script runs `deploy` after approval. All commands share the
-same [exit codes](docs/reference.md#exit-codes).
+Select **Approve** or **Reject** on your phone. The script runs `deploy` only
+after approval.
 
-### Choose what a script does next
+### Choose what happens next
 
 ```sh
-choice=$(yappr ask laptop "Disk is full. What next?" \
-  --choice clean --choice stop) || exit $?
+choice=$(yappr ask phone "Backup failed. What next?" \
+  --choice retry="Retry backup" --choice stop) || exit $?
 
 case "$choice" in
-  clean) ./cleanup ;;
+  retry) ./backup ;;
   stop)  exit 1 ;;
 esac
 ```
 
-`ask` prints the selected value, such as `clean`.
-The script stops on expiry, cancellation, or error.
+`ask` prints the selected value, such as `retry`. The script stops if the
+question expires, you cancel it, or an error occurs.
 
-### Answer a question
+## Everyday use
 
-In the browser app, select a choice on the question.
-On the laptop, list what still needs your attention: questions for you, and
-subjects whose newest state is a warning or an alert.
-
-```sh
-yappr read server --open
-```
-
-Answer a question with its entry number and a choice, such as:
-
-```sh
-yappr answer server 42 approve
-```
-
-Yappr saves your answer locally before sending it.
-If the server is offline, run `yappr retry` when it is reachable again.
-
-### Read several machines
-
-```sh
-yappr read server nas
-yappr read server nas -f --output json
-```
-
-Each machine has its own saved position. `read` prints the entries that you
-have not read yet. With `-f`, it then waits for new ones, and it resumes after
-sleep or a connection failure.
-
-## Manage devices
-
-```sh
-yappr status           # this machine, its devices, questions, and queued answers
-yappr allow laptop
-yappr deny laptop
-yappr health server    # connection state, path, and round-trip time
-```
-
-Pairing or `yappr allow` grants read access. Only the assigned device can answer
-each question. `yappr deny` revokes access and closes active feed connections
-within five seconds.
+- Keep the browser page open and your device awake to receive updates and send answers.
+- Leave `yappr start` running on your computer so it can send entries the browser missed.
+- The browser keeps the newest 5,000 entries from each machine.
+- Select **Open** to find questions waiting for your answer. Use **Undo** within five seconds to change a selection.
+- An answer stays queued on this device until the computer confirms it, also when you close the page.
+- Later starts use your existing pairings. Run `yappr start --pair` for a new code, or `yappr pair` in another terminal while it runs.
 
 ## Reference
 
-The [CLI reference](docs/reference.md) describes the entry format, exit
-codes, questions, pairing, several writers, relays, and storage.
+The [CLI reference](docs/reference.md) covers command options, exit codes,
+reading from several machines, device access, and connection settings.
 
 ## License
 

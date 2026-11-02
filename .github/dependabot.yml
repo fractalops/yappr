@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # One pull request each week for the Cargo updates in the lock file.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+  # dist writes release.yml. Change its pins in dist-workspace.toml.
+  - package-ecosystem: github-actions
+    directory: /
+    exclude-paths:
+      - .github/workflows/release.yml
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

@@ -7,7 +7,7 @@ other devices. A script can wait for your reply before it continues. Each
 machine keeps its feed, so devices that were offline can catch up when they
 reconnect.
 
-Your devices connect directly where possible. Otherwise, an iroh relay carries
+Your devices connect directly where possible. Otherwise, an [iroh](https://www.iroh.computer/) [relay](https://docs.iroh.computer/concepts/relays) carries
 their end-to-end encrypted traffic. The relay cannot read your entries or
 answers, and it does not store your feed. You do not need an account.
 

@@ -103,12 +103,13 @@ question expires, you cancel it, or an error occurs.
 
 ## Everyday use
 
-- Keep the browser page open and your device awake to receive updates and send answers.
-- Leave `yappr start` running on your computer so it can send entries the browser missed.
-- The browser keeps the newest 5,000 entries from each machine.
-- Select **Open** to find questions waiting for your answer. Use **Undo** within five seconds to change a selection.
-- An answer stays queued on this device until the computer confirms it, also when you close the page.
+- Leave `yappr start` running. It sends each new entry to your devices, and a device that was offline gets the entries it missed.
+- Without `start`, `post`, `ask`, and `approve` send to your devices themselves. If a device does not confirm a new entry, `post` returns 5, and `yappr retry` sends it later.
 - Later starts use your existing pairings. Run `yappr start --pair` for a new code, or `yappr pair` in another terminal while it runs.
+- `yappr status` lists your devices, and shows which of them can read the feed and which get new entries.
+- `yappr read` prints this machine's own feed, and `yappr read --open` lists the questions that wait for an answer.
+
+The [app's README](https://github.com/fractalops/yappr.run#readme) explains how the app keeps entries and answers.
 
 ## Reference
 

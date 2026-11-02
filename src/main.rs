@@ -425,8 +425,8 @@ enum HooksCommand {
         #[clap(long, value_name = "DEVICE")]
         to: Option<String>,
         /// The events, such as permission,notification,stop or
-        /// pretooluse:Bash. The default is permission, notification (Claude
-        /// only), and stop.
+        /// pretooluse:Bash. The default is permission and stop. Claude
+        /// also has notification.
         #[clap(long)]
         events: Option<String>,
         /// Which settings file to change.
@@ -467,6 +467,9 @@ struct HookArgs {
     /// How long to wait for an answer.
     #[clap(long, value_parser = parse_interval, default_value = "2m")]
     timeout: Duration,
+    /// Deliver the feed through this entry, and read no event.
+    #[clap(long, hide = true)]
+    deliver: Option<u64>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1909,11 +1912,37 @@ fn hooks_command(common: &CommonArgs, command: HooksCommand) -> Result<()> {
 /// Handle one hook event. A failure never blocks the agent: yappr reports
 /// it on stderr and gives no decision, so the agent asks as before.
 async fn hook(common: &CommonArgs, args: HookArgs) {
+    if let Some(through) = args.deliver {
+        if let Ok(store) = common.store() {
+            deliver_now(common, &store, through).await.ok();
+        }
+        return;
+    }
     match run_hook(common, args).await {
         Ok(Some(decision)) => println!("{decision}"),
         Ok(None) => {}
         Err(error) => eprintln!("yappr hook: {}", shown(&error)),
     }
+}
+
+/// Start a process that delivers the feed through `through`, and do not wait
+/// for it. The saved entry stays in the feed if the delivery fails.
+fn deliver_later(store: &Store, agent: yappr::hooks::Agent, through: u64) -> Result<()> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .arg("--dir")
+        .arg(store.dir())
+        .args(["hook", "--agent", agent.name(), "--deliver"])
+        .arg(through.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // A process group of its own, so that the agent does not stop it with
+    // the hook.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command.spawn().context("start the delivery")?;
+    Ok(())
 }
 
 async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_json::Value>> {
@@ -1945,9 +1974,9 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                 data: None,
                 extra: Default::default(),
             })?;
-            if let Err(error) = deliver_now(common, &store, entry.id).await {
-                eprintln!("yappr hook: {}", shown(&error));
-            }
+            // The agent waits for the hook. A device that is not reachable
+            // must not stop the agent, so deliver in another process.
+            deliver_later(&store, args.agent, entry.id)?;
             Ok(None)
         }
         Action::Ask {

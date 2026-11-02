@@ -689,7 +689,7 @@ async fn hooks_install_keeps_other_hooks_and_remove_restores_the_file() {
     let status = yappr_hook(dir.path(), home.path(), &["hooks", "status"], "").await;
     let listed = String::from_utf8(status.stdout).unwrap();
     assert!(
-        listed.contains("PermissionRequest") && listed.contains("Notification"),
+        listed.contains("PermissionRequest") && listed.contains("Stop"),
         "{listed}"
     );
 
@@ -799,4 +799,32 @@ async fn other_events_post_and_failures_never_block_the_agent() {
         assert!(out.stdout.is_empty());
         assert!(String::from_utf8_lossy(&out.stderr).starts_with("yappr hook: "));
     }
+}
+
+#[tokio::test]
+async fn a_post_hook_does_not_wait_for_a_device_that_is_not_reachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let gone = iroh::SecretKey::generate().public();
+    let ticket = EndpointTicket::new(iroh::EndpointAddr::new(gone));
+    peers::set_receiver(dir.path(), "phone", &ticket).unwrap();
+    let stop = r#"{"hook_event_name":"Stop","cwd":"/work/app","last_assistant_message":"Done."}"#;
+    let started = std::time::Instant::now();
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &["hook", "--agent", "claude"],
+        stop,
+    )
+    .await;
+    assert!(out.status.success());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    // The entry stays in the feed for a later delivery.
+    let read = yappr(dir.path(), &["status", "--output", "json"]).await;
+    let status: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
+    assert_eq!(status["feed"]["entries"], 1, "{status}");
 }

@@ -97,7 +97,9 @@ const ALL: [Event; 7] = [
 
 /// The events of an install without --events.
 pub fn default_events(agent: Agent) -> Vec<Selected> {
-    [Event::PermissionRequest, Event::Notification, Event::Stop]
+    // A Claude notification repeats a permission request or a stop, so it is
+    // not a default.
+    [Event::PermissionRequest, Event::Stop]
         .into_iter()
         .filter(|e| e.supported(agent))
         .map(|event| Selected {
@@ -602,7 +604,7 @@ mod tests {
             settings["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"],
             150
         );
-        assert_eq!(installed(&settings).len(), 3);
+        assert_eq!(installed(&settings).len(), 2);
         assert_eq!(settings["model"], "x");
 
         assert!(remove(&mut settings));

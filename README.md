@@ -101,16 +101,6 @@ esac
 `ask` prints the selected value, such as `retry`. The script stops if the
 question expires, you cancel it, or an error occurs.
 
-## Everyday use
-
-- Leave `yappr start` running. It sends each new entry to your devices, and a device that was offline gets the entries it missed.
-- Without `start`, `post`, `ask`, and `approve` send to your devices themselves. If a device does not confirm a new entry, `post` returns 5, and `yappr retry` sends it later.
-- Later starts use your existing pairings. Run `yappr start --pair` for a new code, or `yappr pair` in another terminal while it runs.
-- `yappr status` lists your devices, and shows which of them can read the feed and which get new entries.
-- `yappr read` prints this machine's own feed, and `yappr read --open` lists the questions that wait for an answer.
-
-The [app's README](https://github.com/fractalops/yappr.run#readme) explains how the app keeps entries and answers.
-
 ## Reference
 
 The [CLI reference](docs/reference.md) covers command options, exit codes,

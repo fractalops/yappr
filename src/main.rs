@@ -12,7 +12,7 @@ use jiff::{tz::TimeZone, Timestamp, Zoned};
 use regex::Regex;
 use tokio::time::timeout;
 use yappr::{
-    choices::{self, Choice, Question},
+    choices::{self, Choice, Question, QuestionStatus},
     client::{Denied, Event, Follower, Unreachable},
     control::ControlClient,
     cursor::Cursor,
@@ -2129,9 +2129,9 @@ fn status(common: &CommonArgs, text: bool) -> Result<()> {
             .filter(|id| !named.contains(*id))
             .map(|id| (None, *id, true, false)),
     );
-    let mut questions = std::collections::BTreeMap::<String, u64>::new();
+    let mut questions = std::collections::BTreeMap::<&str, u64>::new();
     for state in choices::list(&store.entries()?) {
-        *questions.entry(state.status).or_default() += 1;
+        *questions.entry(state.status.as_str()).or_default() += 1;
     }
     let queued = yappr::outbox::list(store.dir())?
         .iter()
@@ -2282,9 +2282,9 @@ async fn ask(
             // final, so report it in place of the cancellation.
             let cancelled = choices::cancel(&store, &question.id);
             let state = choices::get(&store.entries()?, &question.id)?;
-            match state.status.as_str() {
-                "pending" => cancelled?,
-                "cancelled" => {}
+            match state.status {
+                QuestionStatus::Pending => cancelled?,
+                QuestionStatus::Cancelled => {}
                 _ => if let Some(result) = finish(state) { return result; },
             }
             Err(QuestionOutcome { code: 8, message: "the wait stopped. Use yappr wait to read the final state" }.into())
@@ -2313,7 +2313,7 @@ async fn final_state(common: &CommonArgs, id: &str) -> Result<choices::QuestionS
             .states()
             .pop()
             .ok_or_else(|| choices::ChoiceError::new("not_found", "the question does not exist"))?;
-        let pending = state.status == "pending";
+        let pending = state.status == QuestionStatus::Pending;
         if pending && delivery.is_none() {
             delivery = Some(
                 QuestionDelivery::start(common, &store, state.question.responder)
@@ -2391,8 +2391,8 @@ impl QuestionDelivery {
 /// The result of a question in a final state, or `None` while it is pending.
 fn finish(state: choices::QuestionState) -> Option<Result<()>> {
     let outcome = |code, message| Some(Err(QuestionOutcome { code, message }.into()));
-    match state.status.as_str() {
-        "answered" => {
+    match state.status {
+        QuestionStatus::Answered => {
             let Some(decision) = state.decision else {
                 return Some(Err(anyhow::anyhow!("the decision is missing")));
             };
@@ -2403,9 +2403,9 @@ fn finish(state: choices::QuestionState) -> Option<Result<()>> {
                 Some(Ok(()))
             }
         }
-        "expired" => outcome(6, "the question expired"),
-        "cancelled" => outcome(8, "the question was cancelled"),
-        _ => None,
+        QuestionStatus::Expired => outcome(6, "the question expired"),
+        QuestionStatus::Cancelled => outcome(8, "the question was cancelled"),
+        QuestionStatus::Pending => None,
     }
 }
 

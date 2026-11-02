@@ -33,6 +33,7 @@ Commands operate on the selected local feed unless they name a writer.
 | `id`, `ticket` | Print the local endpoint ID or feed ticket |
 | `status`, `health WRITER` | Inspect local state or probe a writer's connection |
 | `network show`, `network set` | Read or save relay settings |
+| `hooks install AGENT`, `hooks status`, `hooks remove AGENT` | Connect Claude Code or Codex to a device |
 
 ## Output
 
@@ -231,6 +232,48 @@ A different submission cannot replace it. The writer rejects expired or cancelle
 Ctrl-C during `ask` or `approve` attempts cancellation. An already final decision determines the result.
 
 Feed records use the `choices` extension with type `question`, `decision`, or `cancelled`.
+
+## Agent hooks
+
+```sh
+yappr hooks install claude --to phone --timeout 5m
+yappr hooks install codex --scope project --events permission,stop,pretooluse:Bash
+```
+
+`install` adds the yappr hooks to the settings of the agent. It keeps the other hooks and saves a copy of the old file as `FILE.yappr-backup`.
+Running `install` again replaces the yappr hooks. `status` lists the installed hooks. `remove` removes only the yappr hooks.
+
+| Scope | Claude Code | Codex |
+|---|---|---|
+| `user` (default) | `~/.claude/settings.json` | `~/.codex/hooks.json` |
+| `project` | `.claude/settings.json` | `.codex/hooks.json` |
+| `local` | `.claude/settings.local.json` | Not available |
+
+`CLAUDE_CONFIG_DIR` and `CODEX_HOME` replace `~/.claude` and `~/.codex`.
+
+`--to DEVICE` selects the device that answers. Without it, `install` uses the one device that receives the feed.
+If several devices can answer, give `--to`. `--timeout DURATION` sets how long a request waits. Default: `2m`.
+The hook command saves the feed directory, the device, and the timeout.
+
+`--events` selects the events. Default: `permission,stop`.
+
+| Event | Agent event | What yappr does |
+|---|---|---|
+| `permission` | `PermissionRequest` | Asks for approval and gives the decision to the agent |
+| `pretooluse:TOOL` | `PreToolUse` for a tool, such as `Bash` | Asks for approval before each matching tool runs |
+| `stop` | `Stop` | Posts `AGENT.stop` with the last message of the agent |
+| `subagent` | `SubagentStop` | Posts `AGENT.subagent` |
+| `notification` | `Notification`, Claude Code only | Posts `claude.notification`. It repeats permission requests and stops |
+| `session` | `SessionStart`, `SessionEnd` | Posts `AGENT.session` |
+
+A request shows the tool and its command on the device. Approval allows the tool, and rejection denies it.
+With no answer before the timeout, the hook gives no decision, and the agent asks in the terminal.
+A hook always exits 0 and writes errors to stderr. An error never blocks the agent.
+
+A post hook saves the entry and returns. Another process delivers it. If no device is reachable, `start` or `retry` delivers it later.
+Bodies longer than 8 KiB are cut.
+
+Codex runs new or changed hooks only after you trust them with `/hooks`. Without trust, Codex skips them and shows no error in `codex exec`.
 
 ## Pairing and access
 

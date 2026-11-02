@@ -101,6 +101,28 @@ esac
 `ask` prints the selected value, such as `retry`. The script stops if the
 question expires, you cancel it, or an error occurs.
 
+## Coding agents
+
+yappr can send the permission requests of Claude Code and Codex to your phone.
+
+```sh
+yappr hooks install claude
+yappr hooks install codex
+```
+
+When the agent asks to run a command, your phone shows the command. Select
+**Approve** or **Reject**. Claude Code also shows its prompt in the terminal,
+and you can answer there. If you do not answer on the phone in 2 minutes, the
+agent asks in the terminal.
+
+When the agent finishes, your phone shows its last message.
+
+Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
+trust the yappr hooks.
+
+To remove the hooks, run `yappr hooks remove claude` or
+`yappr hooks remove codex`.
+
 ## Reference
 
 The [CLI reference](docs/reference.md) covers command options, exit codes,

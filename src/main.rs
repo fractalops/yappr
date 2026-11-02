@@ -2604,7 +2604,13 @@ async fn pairing_session(
                     _ = tokio::signal::ctrl_c() => return interrupted(),
                 };
                 let accept = matches!(answer.trim().to_lowercase().as_str(), "y" | "yes");
-                pairing::confirm(store, candidate.id, accept)?;
+                // "pair --accept" or "pair --reject" in another terminal can
+                // answer first. The next check reports that answer.
+                if let Err(error) = pairing::confirm(store, candidate.id, accept) {
+                    if pairing::get(store.dir(), &invitation.token)?.status == "pending" {
+                        return Err(error);
+                    }
+                }
                 continue;
             }
             eprintln!(
@@ -2749,6 +2755,7 @@ async fn join(common: &CommonArgs, text: &str, name: String, alias: Option<Strin
     let endpoint = net::bind(common.secret()?, common.net(None)?, vec![], None).await?;
     let client = ControlClient::new(endpoint.clone());
     let result = async {
+        let mut waiting = None;
         loop {
             // The writer answers a claimed invitation for a short time after
             // its deadline, so keep asking until that window ends.
@@ -2787,7 +2794,11 @@ async fn join(common: &CommonArgs, text: &str, name: String, alias: Option<Strin
                 }
                 "rejected" => bail!("{}", yappr::proto::printable(&reply.message)),
                 _ => {
-                    eprintln!("{}", yappr::proto::printable(&reply.message));
+                    // Print the message once, not on each ask.
+                    if waiting.as_ref() != Some(&reply.message) {
+                        eprintln!("{}", yappr::proto::printable(&reply.message));
+                        waiting = Some(reply.message);
+                    }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }

@@ -282,18 +282,22 @@ fn subject_of(cwd: &str) -> String {
 /// `text` with at most [`MAX_TEXT`] bytes and with no control characters
 /// other than a newline and a tab, which an entry body does not allow.
 fn text(text: &str) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        let c = match c {
+    let mut out: String = text
+        .chars()
+        .map(|c| match c {
             '\n' | '\t' => c,
             c if c.is_control() => '\u{fffd}',
             c => c,
-        };
-        if out.len() + c.len_utf8() > MAX_TEXT {
-            out.push('…');
-            break;
+        })
+        .collect();
+    if out.len() > MAX_TEXT {
+        // Cut on a character boundary, and keep room for the ellipsis.
+        let mut end = MAX_TEXT - '…'.len_utf8();
+        while !out.is_char_boundary(end) {
+            end -= 1;
         }
-        out.push(c);
+        out.truncate(end);
+        out.push('…');
     }
     out
 }
@@ -545,7 +549,13 @@ mod tests {
         ) else {
             panic!()
         };
-        assert!(body.len() <= MAX_TEXT + '…'.len_utf8());
+        assert!(body.len() <= MAX_TEXT && body.ends_with('…'));
+        // A body at the limit stays whole. One byte more is cut, with the
+        // ellipsis inside the limit, also in the middle of a character.
+        assert_eq!(text(&"x".repeat(MAX_TEXT)), "x".repeat(MAX_TEXT));
+        assert_eq!(text(&"x".repeat(MAX_TEXT + 1)).len(), MAX_TEXT);
+        let wide = text(&"é".repeat(MAX_TEXT));
+        assert!(wide.len() <= MAX_TEXT && wide.ends_with('…'));
         assert_eq!(
             plan(
                 Agent::Claude,

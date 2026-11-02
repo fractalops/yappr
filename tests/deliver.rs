@@ -696,6 +696,10 @@ async fn hooks_install_keeps_other_hooks_and_remove_restores_the_file() {
     let out = yappr_hook(dir.path(), home.path(), &["hooks", "remove", "claude"], "").await;
     assert!(out.status.success());
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), original);
+    let status = yappr_hook(dir.path(), home.path(), &["hooks", "status", "claude"], "").await;
+    assert!(String::from_utf8(status.stderr)
+        .unwrap()
+        .contains("No yappr hooks are installed"));
 
     let codex = yappr_hook(dir.path(), home.path(), &["hooks", "install", "codex"], "").await;
     assert!(String::from_utf8_lossy(&codex.stderr).contains("/hooks"));

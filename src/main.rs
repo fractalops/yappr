@@ -1867,6 +1867,7 @@ fn hooks_command(common: &CommonArgs, command: HooksCommand) -> Result<()> {
         }
         HooksCommand::Status { agent } => {
             let agents = agent.map_or(vec![Agent::Claude, Agent::Codex], |a| vec![a]);
+            let mut found = false;
             for agent in agents {
                 for scope in [HookScope::User, HookScope::Project, HookScope::Local] {
                     let Ok(path) = hook_settings(agent, scope) else {
@@ -1879,11 +1880,15 @@ fn hooks_command(common: &CommonArgs, command: HooksCommand) -> Result<()> {
                     if installed.is_empty() {
                         continue;
                     }
+                    found = true;
                     println!("{agent} ({}):", path.display());
                     for (event, command) in installed {
                         println!("  {event}: {command}");
                     }
                 }
+            }
+            if !found {
+                eprintln!("No yappr hooks are installed. Run \"yappr hooks install claude\" or \"yappr hooks install codex\".");
             }
             Ok(())
         }
@@ -1974,14 +1979,15 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                 ..Default::default()
             };
             let question = choices::create_with(&store, question, details)?;
-            // The question expires at the deadline. The extra time covers a
-            // slow last delivery.
-            let state = timeout(
-                args.timeout + Duration::from_secs(10),
-                final_state(common, &question.id),
-            )
-            .await
-            .unwrap_or_else(|_| anyhow::bail!("no answer in time"));
+            // The question expires at the deadline, and a decision cannot
+            // arrive after it. Read the state once more, in case a decision
+            // reached disk at the deadline.
+            let state = match timeout(args.timeout, final_state(common, &question.id)).await {
+                Ok(state) => state,
+                Err(_) => store
+                    .entries()
+                    .and_then(|entries| choices::get(&entries, &question.id)),
+            };
             match state {
                 Ok(state) if state.status == "answered" => {
                     let approved = state.decision.is_some_and(|d| d.value == "approve");

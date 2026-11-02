@@ -28,8 +28,7 @@ Commands operate on the selected local feed unless they name a writer.
 | `wait ID`, `cancel ID` | Wait for the result of a local question, or cancel it |
 | `answer WRITER ID VALUE`, `retry` | Submit an answer, or resend queued submissions and deliver the feed |
 | `pair`, `join CODE` | Invite a device, or request access with a pairing code |
-| `allow DEVICE [--alias NAME --receives]`, `deny DEVICE` | Grant or revoke read access, and optionally deliver to the device |
-| `key [--name NAME] [--for DEVICE]` | Create a key for a machine that a device allows without pairing, such as a CI job |
+| `allow DEVICE`, `deny DEVICE` | Grant or revoke read access |
 | `alias set NAME ID_OR_TICKET`, `alias remove NAME` | Save or remove a local device name |
 | `id`, `ticket` | Print the local endpoint ID or feed ticket |
 | `status`, `health WRITER` | Inspect local state or probe a writer's connection |
@@ -342,34 +341,6 @@ On a receiving CLI, inspect the writer's connection without advancing its saved 
 ```sh
 yappr health computer
 ```
-
-### CI jobs and other machines without pairing
-
-A CI job uses its own key pair. The job keeps the private key. Your phone allows the public key, like an SSH server allows a key in `authorized_keys`. The job needs no pairing, no running `start`, and no saved state between runs.
-
-On a computer that is paired with your phone, create the key:
-
-```sh
-yappr key --name "CI deploys" --for phone
-```
-
-The command prints three values:
-
-- The private key. Store it in your CI's secret store as `YAPPR_KEY`. Anyone with this key can send entries and questions to your phone as this machine.
-- The address of `phone`, from this computer's pairing. It is public. Store it as a CI variable, such as `YAPPR_PHONE`.
-- A machine code, also as a QR code. Scan it in the app (Setup, then Scan QR) and allow the machine.
-
-The computer does not keep the private key. `--output env` prints `KEY=value` lines, and `--output json` prints one JSON object.
-
-In the CI job, allow the phone, then ask:
-
-```sh
-yappr allow "$YAPPR_PHONE" --alias phone --receives
-yappr approve phone "Deploy $GIT_SHA?" --timeout 30m
-```
-
-`allow` with `--receives` saves the address and delivers to the device, as pairing does. `approve` delivers the question and waits on that connection. It returns 0 for approval, 7 for rejection, and 6 when the question expires.
-To revoke the job, pause or remove the machine in the app, then create a new key.
 
 ## Exit codes
 

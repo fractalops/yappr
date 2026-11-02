@@ -613,3 +613,218 @@ async fn key_prints_env_lines_with_the_address_of_a_paired_device() {
     let unknown = yappr(dir.path(), &["key", "--for", "tablet"]).await;
     assert!(!unknown.status.success());
 }
+
+/// Run the built binary with `stdin`, and with the agent settings under
+/// `home`, as an agent runs a hook.
+async fn yappr_hook(
+    dir: &std::path::Path,
+    home: &std::path::Path,
+    args: &[&str],
+    stdin: &str,
+) -> std::process::Output {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_yappr"))
+        .args(args)
+        .env("YAPPR_DIR", dir)
+        .env("YAPPR_NETWORK", "local")
+        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+        .env("CODEX_HOME", home.join("codex"))
+        .env_remove("IROH_SECRET")
+        .env_remove("YAPPR_KEY")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(stdin.as_bytes()).await.unwrap();
+    drop(input);
+    child.wait_with_output().await.unwrap()
+}
+
+#[tokio::test]
+async fn hooks_install_keeps_other_hooks_and_remove_restores_the_file() {
+    let (dir, _device) = cli_writer().await;
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let original = "{\n  \"model\": \"x\",\n  \"hooks\": {\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"other-tool\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
+    std::fs::write(&settings, original).unwrap();
+
+    let out = yappr_hook(dir.path(), home.path(), &["hooks", "install", "claude"], "").await;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("ask phone"), "{stderr}");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(
+        value["hooks"]["Stop"][0]["hooks"][0]["command"],
+        "other-tool"
+    );
+    let command = value["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        command.contains(" hook --agent claude --to 'phone'"),
+        "{command}"
+    );
+    // The key order of the file stays.
+    assert!(
+        std::fs::read_to_string(&settings)
+            .unwrap()
+            .find("\"model\"")
+            < std::fs::read_to_string(&settings)
+                .unwrap()
+                .find("\"hooks\"")
+    );
+    assert!(home
+        .path()
+        .join("claude/settings.json.yappr-backup")
+        .exists());
+
+    let status = yappr_hook(dir.path(), home.path(), &["hooks", "status"], "").await;
+    let listed = String::from_utf8(status.stdout).unwrap();
+    assert!(
+        listed.contains("PermissionRequest") && listed.contains("Stop"),
+        "{listed}"
+    );
+
+    let out = yappr_hook(dir.path(), home.path(), &["hooks", "remove", "claude"], "").await;
+    assert!(out.status.success());
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), original);
+    let status = yappr_hook(dir.path(), home.path(), &["hooks", "status", "claude"], "").await;
+    assert!(String::from_utf8(status.stderr)
+        .unwrap()
+        .contains("No yappr hooks are installed"));
+
+    let codex = yappr_hook(dir.path(), home.path(), &["hooks", "install", "codex"], "").await;
+    assert!(String::from_utf8_lossy(&codex.stderr).contains("/hooks"));
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home.path().join("codex/hooks.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(value["hooks"].get("Notification").is_none());
+    assert!(value["hooks"].get("PermissionRequest").is_some());
+}
+
+#[tokio::test]
+async fn a_permission_request_waits_for_the_device_and_returns_its_decision() {
+    let (dir, mut device) = cli_writer().await;
+    let home = tempfile::tempdir().unwrap();
+    let event = r#"{"hook_event_name":"PermissionRequest","session_id":"s","cwd":"/work/app","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}"#;
+    for (n, value, behavior) in [(1, "approve", "allow"), (2, "reject", "deny")] {
+        let path = dir.path().to_owned();
+        let home_path = home.path().to_owned();
+        let asking = tokio::spawn(async move {
+            yappr_hook(
+                &path,
+                &home_path,
+                &[
+                    "hook",
+                    "--agent",
+                    "claude",
+                    "--to",
+                    "phone",
+                    "--timeout",
+                    "30s",
+                ],
+                event,
+            )
+            .await
+        });
+        let entry = device.wait_for(n * 2 - 1).await.remove(n * 2 - 2);
+        assert_eq!(entry.title.as_deref(), Some("Claude: Bash"));
+        assert_eq!(entry.body, "rm -rf build");
+        assert_eq!(entry.subject.as_deref(), Some("project/app"));
+        let question = choices::question(&entry).unwrap();
+        let conn = device.last.borrow().clone().unwrap();
+        let _: control::Reply = control::exchange_on(
+            &conn,
+            &control::Request::Submit {
+                submission: Submission {
+                    id: choices::random_id(),
+                    question_id: question.id,
+                    value: value.into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let out = timeout(WAIT, asking).await.unwrap().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let decision: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            decision["hookSpecificOutput"]["decision"]["behavior"],
+            behavior
+        );
+        // The decision entry reaches the device too.
+        device.wait_for(n * 2).await;
+    }
+}
+
+#[tokio::test]
+async fn other_events_post_and_failures_never_block_the_agent() {
+    let (dir, mut device) = cli_writer().await;
+    let home = tempfile::tempdir().unwrap();
+    let stop = r#"{"hook_event_name":"Stop","cwd":"/work/app","last_assistant_message":"All tests pass."}"#;
+    let out = yappr_hook(dir.path(), home.path(), &["hook", "--agent", "codex"], stop).await;
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    let entry = device.wait_for(1).await.remove(0);
+    assert_eq!(
+        (entry.kind.as_str(), entry.title.as_deref()),
+        ("codex.stop", Some("Codex finished"))
+    );
+    assert_eq!(entry.body, "All tests pass.");
+
+    // No device, and an event that is not JSON: exit 0 and no decision.
+    let ask = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
+    for (args, input) in [
+        (vec!["hook", "--agent", "claude"], ask),
+        (
+            vec!["hook", "--agent", "claude", "--to", "phone"],
+            "not json",
+        ),
+    ] {
+        let out = yappr_hook(dir.path(), home.path(), &args, input).await;
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).starts_with("yappr hook: "));
+    }
+}
+
+#[tokio::test]
+async fn a_post_hook_does_not_wait_for_a_device_that_is_not_reachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let gone = iroh::SecretKey::generate().public();
+    let ticket = EndpointTicket::new(iroh::EndpointAddr::new(gone));
+    peers::set_receiver(dir.path(), "phone", &ticket).unwrap();
+    let stop = r#"{"hook_event_name":"Stop","cwd":"/work/app","last_assistant_message":"Done."}"#;
+    let started = std::time::Instant::now();
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &["hook", "--agent", "claude"],
+        stop,
+    )
+    .await;
+    assert!(out.status.success());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    // The entry stays in the feed for a later delivery.
+    let read = yappr(dir.path(), &["status", "--output", "json"]).await;
+    let status: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
+    assert_eq!(status["feed"]["entries"], 1, "{status}");
+}

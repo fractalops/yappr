@@ -7,6 +7,8 @@ on:
   pull_request:
     branches:
       - main
+  # A release runs these checks on the tagged commit before it builds.
+  workflow_call:
 
 env:
   RUST_BACKTRACE: 1

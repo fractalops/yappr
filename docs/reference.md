@@ -126,7 +126,7 @@ Readers should ignore unknown fields. `read` preserves them in JSON and stops at
 ### Signatures
 
 The writer signs each new entry with its identity key. The signature covers the bytes `yappr/entry/1`, a zero byte, the log name, a zero byte, and the entry without `sig` as JSON with sorted keys and no spaces.
-The log name is the `time` of the log's first entry. A reader stops at an entry with a signature that does not match.
+The log name is the `time` of the log's first entry. `read` stops at an entry with a signature that does not match, and returns 4. It makes the same checks on the local feed.
 A feed belongs to the identity that signed its first entry. `post` with another identity fails.
 
 ## Reading

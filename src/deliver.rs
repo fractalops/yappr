@@ -167,7 +167,7 @@ impl Incoming {
 }
 
 #[cfg(not(wasm_browser))]
-pub use writer::{deliver, deliver_until_stopped, keep_delivering};
+pub use writer::{deliver, deliver_until_stopped, keep_delivering, NotAllowed};
 
 /// The writer side: open connections to the devices that receive the feed.
 #[cfg(not(wasm_browser))]
@@ -202,6 +202,26 @@ mod writer {
     /// How often a running writer reads its list of devices again.
     const RECEIVERS_CHECK: Duration = Duration::from_secs(5);
 
+    /// The device is not in this writer's allow list, so the writer does not
+    /// deliver to it.
+    #[derive(Debug)]
+    pub struct NotAllowed {
+        pub device: iroh::EndpointId,
+    }
+
+    impl std::fmt::Display for NotAllowed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "the device {} is not allowed to read this feed. Run: yappr allow {}",
+                self.device.fmt_short(),
+                self.device
+            )
+        }
+    }
+
+    impl std::error::Error for NotAllowed {}
+
     /// Deliver the feed to the device at `addr`. With `until`, return after
     /// the device saved that entry. Without it, return when the connection
     /// ends. `progress` gets each [`Stored`] report of the device.
@@ -214,6 +234,9 @@ mod writer {
         progress: &watch::Sender<Stored>,
     ) -> Result<()> {
         let device = addr.id;
+        if !feed.store().allow_list().contains(&device) {
+            return Err(NotAllowed { device }.into());
+        }
         let addr = crate::net::relay_addr(addr);
         let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, ALPN))
             .await

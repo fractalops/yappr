@@ -83,11 +83,31 @@ impl fmt::Display for ChoiceError {
 }
 impl std::error::Error for ChoiceError {}
 
+/// The choice record of an entry. A record that does not obey the rules of
+/// its type is not a record, so no reader uses or shows its fields.
 fn record(entry: &Entry) -> Option<Record> {
-    entry
-        .extra
-        .get(FIELD)
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
+    let record: Record = serde_json::from_value(entry.extra.get(FIELD)?.clone()).ok()?;
+    record.validate().ok()?;
+    Some(record)
+}
+
+impl Record {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Record::Question { question } => question.validate(),
+            Record::Decision { decision } => {
+                if !valid_id(&decision.question_id) || !valid_id(&decision.submission_id) {
+                    bail!("the decision has an ID that is not valid");
+                }
+                if !valid_value(&decision.value) {
+                    bail!("the decision value is not valid");
+                }
+                Ok(())
+            }
+            Record::Cancelled { question_id } if valid_id(question_id) => Ok(()),
+            Record::Cancelled { .. } => bail!("the question ID is not valid"),
+        }
+    }
 }
 
 /// The question that this entry asks.
@@ -149,13 +169,7 @@ impl Question {
         }
         let mut values = BTreeSet::new();
         for option in &self.options {
-            if option.value.is_empty()
-                || option.value.len() > 64
-                || !option
-                    .value
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-            {
+            if !valid_value(&option.value) {
                 bail!("option values must use 1 to 64 letters, digits, underscores, or hyphens");
             }
             if option.label.trim().is_empty()
@@ -198,6 +212,15 @@ pub fn valid_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// 1 to 64 ASCII letters, digits, underscores, or hyphens: the format of a
+/// choice value.
+pub fn valid_value(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
 }
 
 pub fn approval_options() -> Vec<Choice> {
@@ -451,4 +474,49 @@ pub fn parse_option(text: &str) -> Result<Choice> {
         value: value.into(),
         label: label.into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(choices: serde_json::Value) -> Entry {
+        serde_json::from_value(serde_json::json!({
+            "v": 1, "id": 1, "time": "2026-11-02T10:00:00Z", "source": "ci",
+            "kind": "question", "title": "Deploy?", "body": "", "choices": choices,
+        }))
+        .unwrap()
+    }
+
+    fn question(value: &str) -> serde_json::Value {
+        serde_json::json!({"type": "question", "question": {
+            "id": random_id(), "title": "Deploy?", "body": "", "source": "ci",
+            "options": [{"value": value, "label": "Yes"}, {"value": "no", "label": "No"}],
+            "responder": iroh::SecretKey::generate().public(),
+            "expires_at": null, "approval": false,
+        }})
+    }
+
+    #[test]
+    fn a_record_that_breaks_its_rules_is_not_a_record() {
+        assert!(super::question(&entry(question("yes"))).is_some());
+        // A terminal escape in a value must never reach a reader.
+        assert!(super::question(&entry(question("yes\u{1b}]0;x\u{7}"))).is_none());
+        assert!(list(&[entry(question("yes\u{1b}[2J"))]).is_empty());
+
+        let decision = |value: &str, id: String| {
+            entry(serde_json::json!({"type": "decision", "decision": {
+                "question_id": id, "submission_id": random_id(), "value": value,
+                "responder": iroh::SecretKey::generate().public(),
+                "time": "2026-11-02T10:00:00Z",
+            }}))
+        };
+        assert!(closed(&decision("yes", random_id())).is_some());
+        assert!(closed(&decision("yes\u{1b}[2J", random_id())).is_none());
+        assert!(closed(&decision("yes", "not an id".into())).is_none());
+        let cancelled =
+            |id: &str| entry(serde_json::json!({"type": "cancelled", "question_id": id}));
+        assert!(closed(&cancelled(&random_id())).is_some());
+        assert!(closed(&cancelled("\u{1b}[2J")).is_none());
+    }
 }

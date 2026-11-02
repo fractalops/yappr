@@ -279,7 +279,11 @@ async fn a_writer_delivers_only_to_an_allowed_device() {
     )
     .await
     .unwrap();
-    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.downcast_ref::<deliver::NotAllowed>().is_some(),
+        "{err:#}"
+    );
     assert!(device.entries.borrow().is_empty());
 }
 

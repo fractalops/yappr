@@ -97,12 +97,23 @@ async fn revoked_stalled_request_does_not_read_a_new_entry() {
     } else {
         None
     };
+    // The server closes the connection because of the denial, not for
+    // another reason.
+    let reason = timeout(Duration::from_secs(5), conn.closed()).await;
     conn.close(VarInt::from_u32(0), b"review complete");
     peer.close().await;
     server.shutdown().await;
     assert!(
         !matches!(got, Some(Frame::Entry { .. })),
         "a revoked device read a new entry"
+    );
+    assert!(
+        matches!(
+            reason,
+            Ok(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
+                if close.error_code == VarInt::from_u32(proto::DENIED_CODE)
+        ),
+        "the server did not close the connection as denied: {reason:?}"
     );
 }
 

@@ -1365,3 +1365,25 @@ fn one_denied_writer_does_not_discard_another_writers_entries() {
         "healthy feed"
     );
 }
+
+/// A local read makes the same checks as a remote read.
+#[test]
+fn a_local_read_stops_at_a_changed_entry_or_an_unknown_version() {
+    let m = Machine::new();
+    m.post("deployed", &[]);
+    let log = m.dir.path().join("feed.ndjson");
+    let line = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, line.replace("deployed", "changed")).unwrap();
+    let (code, _, stderr) = m.exit(["read", "--since", "0"], b"");
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("signature"), "{stderr}");
+
+    std::fs::write(
+        &log,
+        "{\"v\":2,\"id\":1,\"time\":\"2026-11-02T10:00:00Z\",\"source\":\"s\",\"kind\":\"event\",\"body\":\"b\"}\n",
+    )
+    .unwrap();
+    let (code, _, stderr) = m.exit(["read", "--since", "0"], b"");
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("version"), "{stderr}");
+}

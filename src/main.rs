@@ -1202,6 +1202,8 @@ impl Source {
 /// Reads the local feed file with the same request and events as a writer.
 struct LocalFeed {
     reader: yappr::store::LogReader,
+    /// The identity that signs this feed.
+    writer: iroh::EndpointId,
     /// The name of the log: the time of the first entry.
     log: Option<String>,
     req: Request,
@@ -1212,7 +1214,7 @@ struct LocalFeed {
 }
 
 impl LocalFeed {
-    fn new(store: &Store, mut req: Request) -> Result<Self> {
+    fn new(store: &Store, writer: iroh::EndpointId, mut req: Request) -> Result<Self> {
         let log = store.log()?;
         // A position in another log does not apply to this log.
         if req.log.is_some() && req.log != log {
@@ -1220,6 +1222,7 @@ impl LocalFeed {
         }
         Ok(Self {
             reader: store.reader()?,
+            writer,
             log,
             filter: yappr::proto::Filter::new(&req)?,
             req,
@@ -1227,6 +1230,20 @@ impl LocalFeed {
             head: 0,
             caught_up: false,
         })
+    }
+
+    /// The next entry of the log after the rules and signature checks that a
+    /// remote reader also makes.
+    fn next_checked(&mut self) -> Result<Option<Entry>> {
+        let Some(entry) = self.reader.next_entry()? else {
+            return Ok(None);
+        };
+        let log = self.log.get_or_insert_with(|| entry.time.to_string());
+        entry
+            .validate()
+            .with_context(|| format!("entry {} of this feed is not valid", entry.id))?;
+        entry.verify(&self.writer, log)?;
+        Ok(Some(entry))
     }
 
     fn wanted(&self, entry: &Entry) -> bool {
@@ -1238,9 +1255,8 @@ impl LocalFeed {
     async fn next(&mut self) -> Result<Option<Event>> {
         if self.replay.is_none() {
             let mut replay = std::collections::VecDeque::new();
-            while let Some(entry) = self.reader.next_entry()? {
+            while let Some(entry) = self.next_checked()? {
                 self.head = entry.id;
-                self.log.get_or_insert_with(|| entry.time.to_string());
                 if self.wanted(&entry) {
                     replay.push_back(entry);
                     if self.req.tail.is_some_and(|n| replay.len() as u64 > n) {
@@ -1261,8 +1277,7 @@ impl LocalFeed {
             return Ok(None);
         }
         loop {
-            while let Some(entry) = self.reader.next_entry()? {
-                self.log.get_or_insert_with(|| entry.time.to_string());
+            while let Some(entry) = self.next_checked()? {
                 if self.wanted(&entry) {
                     return Ok(Some(Event::Entry(entry)));
                 }
@@ -1369,7 +1384,7 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
             (Some(endpoint), Some(addr)) => {
                 Source::Remote(Follower::new(endpoint.clone(), addr, req))
             }
-            _ => Source::Local(LocalFeed::new(&common.store()?, req)?),
+            _ => Source::Local(LocalFeed::new(&common.store()?, secret.public(), req)?),
         };
         tasks.spawn(async move {
             let mut caught_up = false;
@@ -2367,6 +2382,7 @@ fn exit_code(err: &anyhow::Error) -> i32 {
     } else if err.downcast_ref::<Denied>().is_some() {
         3
     } else if err.downcast_ref::<Invalid>().is_some()
+        || err.downcast_ref::<entry::BadSignature>().is_some()
         || err.downcast_ref::<Rejected>().is_some()
         || err.downcast_ref::<yappr::client::OutOfOrder>().is_some()
     {

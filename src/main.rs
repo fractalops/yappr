@@ -789,7 +789,7 @@ async fn deliver_now(common: &CommonArgs, store: &Store, through: u64) -> Result
     while let Some(joined) = tasks.join_next().await {
         let (alias, delivered) = joined?;
         if let Err(error) = delivered {
-            eprintln!("{alias} did not confirm entry {through}: {error:#}");
+            eprintln!("{alias} did not confirm entry {through}: {}", shown(&error));
             missed.push(alias);
         }
     }
@@ -1011,7 +1011,7 @@ async fn on(common: &CommonArgs, args: OnArgs) -> Result<()> {
                                     error.context(format!("entry #{} is not done", entry.id))
                                 );
                             }
-                            eprintln!("entry #{}: {error:#}. Skipped.", entry.id);
+                            eprintln!("entry #{}: {}. Skipped.", entry.id, shown(&error));
                         }
                     }
                     cursor.save(entry.id, follower.log())?;
@@ -1027,7 +1027,8 @@ async fn on(common: &CommonArgs, args: OnArgs) -> Result<()> {
                 }
                 Event::Retrying { delay, error } => {
                     eprintln!(
-                        "cannot read the feed: {error}. Retry in {}s",
+                        "cannot read the feed: {}. Retry in {}s",
+                        yappr::proto::printable(&error),
                         delay.as_secs()
                     );
                 }
@@ -1430,7 +1431,8 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
                         }
                         Event::Retrying { delay, error } => {
                             eprintln!(
-                                "[{label}] cannot read the feed: {error}. Retry in {}s",
+                                "[{label}] cannot read the feed: {}. Retry in {}s",
+                                yappr::proto::printable(&error),
                                 delay.as_secs()
                             );
                             caught_up = false;
@@ -1455,7 +1457,7 @@ async fn read(common: &CommonArgs, mut args: ReadArgs) -> Result<()> {
                 return Err(error);
             }
             if multiple {
-                eprintln!("[{label}] stopped: {error:#}");
+                eprintln!("[{label}] stopped: {}", shown(&error));
             }
             failure = Some(error);
         }
@@ -1789,7 +1791,7 @@ async fn wait(common: &CommonArgs, id: &str) -> Result<()> {
                 QuestionDelivery::start(common, &store, state.question.responder)
                     .await
                     .unwrap_or_else(|error| {
-                        eprintln!("cannot deliver the question: {error:#}");
+                        eprintln!("cannot deliver the question: {}", shown(&error));
                         None
                     }),
             );
@@ -1951,7 +1953,10 @@ async fn answer(
         }
         Err(error) if error.downcast_ref::<choices::ChoiceError>().is_some() => Err(error),
         Err(error) => {
-            eprintln!("The choice remains queued. Run yappr retry. {error:#}");
+            eprintln!(
+                "The choice remains queued. Run yappr retry. {}",
+                shown(&error)
+            );
             Err(Unreachable {
                 writer: ticket.endpoint_addr().id,
                 reason: "the writer did not confirm the choice".into(),
@@ -1973,7 +1978,7 @@ async fn retry(common: &CommonArgs) -> Result<()> {
         match outbox::deliver_with(&dir, &client, &delivery).await {
             Ok(decision) => println!("{}", serde_json::to_string(&decision)?),
             Err(error) => {
-                eprintln!("{}: {error:#}", delivery.submission.question_id);
+                eprintln!("{}: {}", delivery.submission.question_id, shown(&error));
                 // A writer that answered keeps its own code. Any other
                 // failure means that the writer did not confirm the choice.
                 failure = Some(if error.downcast_ref::<choices::ChoiceError>().is_some() {
@@ -2231,6 +2236,12 @@ async fn join(common: &CommonArgs, text: &str, name: String, alias: Option<Strin
     result
 }
 
+/// An error as text that is safe for a terminal. An error can carry text
+/// from another endpoint, such as the reason why it closed a connection.
+fn shown(error: &anyhow::Error) -> String {
+    yappr::proto::printable(&format!("{error:#}"))
+}
+
 fn is_broken_pipe(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
         e.downcast_ref::<io::Error>()
@@ -2409,7 +2420,7 @@ async fn main() {
         Err(e) => {
             let code = exit_code(&e);
             if code != 0 {
-                eprintln!("error: {e:#}");
+                eprintln!("error: {}", shown(&e));
             }
             std::process::exit(code)
         }

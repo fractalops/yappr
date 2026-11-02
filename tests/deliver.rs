@@ -464,3 +464,34 @@ async fn ask_delivers_the_question_and_takes_the_answer_from_the_device() {
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "yes\n");
     assert_eq!(device.wait_for(2).await[1].kind, "decision");
 }
+
+#[tokio::test]
+async fn text_from_another_endpoint_reaches_the_terminal_escaped() {
+    // A writer that closes each connection with escape codes in its reason.
+    let hostile = net::bind(
+        SecretKey::generate(),
+        Network::Local,
+        vec![yappr::ALPN.to_vec()],
+        None,
+    )
+    .await
+    .unwrap();
+    let accepting = hostile.clone();
+    let _task = n0_future::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        while let Some(incoming) = accepting.accept().await {
+            if let Ok(conn) = incoming.await {
+                conn.close(7u32.into(), b"\x1b]0;owned\x07\x1b[2J");
+            }
+        }
+    }));
+    let ticket = EndpointTicket::new(net::addr(&hostile).await).to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let out = yappr(dir.path(), &["read", &ticket, "--since", "0"]).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("owned"), "{stderr}");
+    assert!(
+        !stderr.contains('\u{1b}') && !stderr.contains('\u{7}'),
+        "{stderr:?}"
+    );
+}

@@ -145,6 +145,14 @@ impl Subscription {
             .map_err(|e| explain(&self.conn, self.me, e))?;
         match frame {
             Some(Frame::Feed { log }) => {
+                // A log name is the time of the first entry. Anything else
+                // could break the reader's saved position and its requests.
+                if log
+                    .as_deref()
+                    .is_some_and(|l| l.len() > 64 || l.parse::<jiff::Timestamp>().is_err())
+                {
+                    bail!("the writer sent a log name that is not a time");
+                }
                 // The writer starts again at the first entry of a new log.
                 if self.asked.is_some() && self.asked != log {
                     self.last = 0;

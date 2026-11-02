@@ -634,3 +634,46 @@ async fn follower_stops_when_denied() {
     .expect("timed out");
     assert_eq!(err.downcast_ref::<Denied>().map(|d| d.follower), Some(me));
 }
+
+#[tokio::test]
+async fn the_follower_rejects_a_log_name_that_is_not_a_time() {
+    for name in [
+        "2026-11-02T10:00:00Z\n42 other".to_string(),
+        "x".repeat(5000),
+    ] {
+        let writer = net::bind(
+            SecretKey::generate(),
+            Network::Local,
+            vec![yappr::ALPN.to_vec()],
+            None,
+        )
+        .await
+        .unwrap();
+        let accepting = writer.clone();
+        let task = tokio::spawn(async move {
+            let conn = accepting.accept().await.unwrap().await.unwrap();
+            let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+            let _: Request = yappr::proto::read_frame(&mut recv, yappr::proto::MAX_REQUEST)
+                .await
+                .unwrap()
+                .unwrap();
+            let frame = Frame::Feed { log: Some(name) };
+            yappr::proto::write_frame(&mut send, &frame, yappr::proto::MAX_FRAME)
+                .await
+                .unwrap();
+            conn.closed().await;
+        });
+        let f = follower().await;
+        let mut sub = timeout(
+            WAIT,
+            client::subscribe(&f, net::addr(&writer).await, &once()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let err = timeout(WAIT, sub.next()).await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("not a time"), "{err:#}");
+        drop(sub);
+        task.await.unwrap();
+    }
+}

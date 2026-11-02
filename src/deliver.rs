@@ -23,6 +23,9 @@ pub const GRANT_LIFETIME: jiff::SignedDuration = jiff::SignedDuration::from_mins
 
 const GRANT_DOMAIN: &[u8] = b"yappr/grant/1\0";
 
+/// How long a device waits for the writer's [`Hello`] on a new connection.
+const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The first frame from the writer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hello {
@@ -126,17 +129,18 @@ pub struct Incoming {
 /// the connection speaks for the writer. The caller then checks that it
 /// allows the writer.
 pub async fn accept(conn: Connection, me: EndpointId) -> Result<Incoming> {
-    let (send, mut recv) =
-        n0_future::time::timeout(std::time::Duration::from_secs(10), conn.accept_bi())
-            .await
-            .context("the writer opened no stream in time")??;
-    let hello: Hello = n0_future::time::timeout(
-        std::time::Duration::from_secs(10),
-        proto::read_frame(&mut recv, proto::MAX_REQUEST),
-    )
-    .await
-    .context("the writer sent no hello in time")??
-    .context("the writer sent no hello")?;
+    let hello = async {
+        let (send, mut recv) = conn.accept_bi().await?;
+        let hello: Hello = proto::read_frame(&mut recv, proto::MAX_REQUEST)
+            .await?
+            .context("the writer sent no hello")?;
+        anyhow::Ok((hello, send, recv))
+    };
+    // A connection that sends no hello holds a delivery slot, so it gets
+    // little time.
+    let (hello, send, recv) = n0_future::time::timeout(HELLO_TIMEOUT, hello)
+        .await
+        .context("the writer sent no hello in time")??;
     hello.check(conn.remote_id(), Timestamp::now())?;
     Ok(Incoming {
         conn,

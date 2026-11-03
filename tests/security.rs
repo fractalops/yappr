@@ -392,8 +392,8 @@ async fn zero_limit_does_not_stop_the_router() {
     assert!(alive, "a zero limit stopped service for the next reader");
 }
 
-#[tokio::test]
-async fn accepted_pairing_result_survives_the_claim_deadline() {
+#[test]
+fn accepted_pairing_result_survives_the_claim_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let remote = SecretKey::generate().public();
@@ -403,7 +403,7 @@ async fn accepted_pairing_result_survives_the_claim_deadline() {
         ticket.to_string(),
         "Writer".into(),
         Timestamp::now()
-            .checked_add(SignedDuration::from_millis(500))
+            .checked_add(SignedDuration::from_mins(5))
             .unwrap(),
     )
     .unwrap();
@@ -414,7 +414,15 @@ async fn accepted_pairing_result_survives_the_claim_deadline() {
     };
     pairing::join(&store, remote, join.clone()).unwrap();
     pairing::confirm(&store, remote, true).unwrap();
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Move the saved invitation past its claim deadline after confirmation.
+    // This tests result polling without racing file operations against a timer.
+    let mut offer = pairing::get(store.dir(), &join.token).unwrap();
+    offer.invitation.expires_at = Timestamp::now() - SignedDuration::from_secs(1);
+    disk::write(
+        &store.dir().join("pairing.json"),
+        &serde_json::json!({"offers": {(join.token.clone()): &offer}}),
+    )
+    .unwrap();
     assert!(store.allow_list().contains(&remote));
     assert_eq!(
         pairing::join(&store, remote, join).unwrap().status,

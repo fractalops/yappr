@@ -248,10 +248,9 @@ mod writer {
         let result = async {
             let (mut send, recv) = conn.open_bi().await?;
             proto::write_frame(&mut send, hello, proto::MAX_REQUEST).await?;
-            let _answers = AbortOnDropHandle::new(tokio::spawn(crate::control::answer_on(
-                conn.clone(),
-                feed.store().clone(),
-            )));
+            let (_answers, mut replies) =
+                crate::control::answer_tracked(conn.clone(), feed.store().clone());
+            let mut saved = None;
             let (acks, mut acked) = watch::channel(Stored::default());
             let serving = feed.answer(&conn, send, recv, Some(acks));
             tokio::pin!(serving);
@@ -266,7 +265,15 @@ mod writer {
                         if changed.is_err() {
                             continue;
                         }
-                        let stored = acked.borrow_and_update().clone();
+                        saved = Some(acked.borrow_and_update().clone());
+                    }
+                    ready = async { replies.wait_for(|count| *count == 0).await.map(|_| ()) },
+                        if saved.is_some() =>
+                    {
+                        ready.context("control replies stopped")?;
+                        // A caller may shut the endpoint down as soon as it sees
+                        // this report. Keep serving the feed while replies drain.
+                        let stored = saved.take().expect("a saved-entry report is pending");
                         progress.send_replace(stored.clone());
                         let log = feed.store().log()?;
                         if until.is_some_and(|n| stored.through >= n && stored.log == log) {

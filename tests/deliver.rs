@@ -112,7 +112,7 @@ impl Device {
     async fn wait_for(&mut self, n: usize) -> Vec<Entry> {
         timeout(WAIT, self.entries.wait_for(|e| e.len() >= n))
             .await
-            .expect("timed out")
+            .unwrap_or_else(|_| panic!("timed out waiting for {n} entries"))
             .unwrap()
             .clone()
     }
@@ -346,6 +346,124 @@ async fn the_device_answers_on_the_delivery_connection() {
     // The decision reaches the device too.
     assert_eq!(device.wait_for(2).await[1].kind, "decision");
     delivering.abort();
+}
+
+/// A slow control stream must not lose its reply when the feed is saved.
+#[tokio::test]
+async fn delivery_waits_for_control_replies_before_reporting_saved_entries() {
+    use iroh::endpoint::{presets, QuicTransportConfig, VarInt};
+
+    let writer = Writer::new();
+    // A reply cannot fit until this device starts reading its stream.
+    let device = Endpoint::builder(presets::Minimal)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .clear_ip_transports()
+        .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .alpns(vec![deliver::ALPN.to_vec()])
+        .transport_config(
+            QuicTransportConfig::builder()
+                .stream_receive_window(VarInt::from_u32(16))
+                .build(),
+        )
+        .bind()
+        .await
+        .unwrap();
+    writer.store.allow_list().allow(device.id()).unwrap();
+    let question = choices::create(
+        &writer.store,
+        choices::new_question(
+            "Deploy?".into(),
+            String::new(),
+            "ci".into(),
+            choices::approval_options(),
+            device.id(),
+            None,
+            true,
+        ),
+    )
+    .unwrap();
+    let endpoint = net::bind(writer.secret.clone(), Network::Local, vec![], None)
+        .await
+        .unwrap();
+    let feed = Feed::open(writer.store.clone()).await.unwrap();
+    let addr = net::addr(&device).await;
+    let (progress, mut saved) = watch::channel(Stored::default());
+    let mut delivering = tokio::spawn(async move {
+        deliver::deliver(
+            &endpoint,
+            &feed,
+            addr,
+            &Hello::direct(endpoint.id()),
+            Some(2),
+            &progress,
+        )
+        .await
+    });
+    let conn = timeout(WAIT, device.accept())
+        .await
+        .unwrap()
+        .unwrap()
+        .await
+        .unwrap();
+    let incoming = deliver::accept(conn.clone(), device.id()).await.unwrap();
+    let sub = incoming.subscribe(&Request::default()).await.unwrap();
+    let (entries_tx, mut entries) = watch::channel(Vec::new());
+    let receiving = n0_future::task::AbortOnDropHandle::new(tokio::spawn(receive(sub, entries_tx)));
+    timeout(WAIT, entries.wait_for(|entries| entries.len() == 1))
+        .await
+        .unwrap()
+        .unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    yappr::proto::write_frame(
+        &mut send,
+        &control::Request::Submit {
+            submission: Submission {
+                id: choices::random_id(),
+                question_id: question.id,
+                value: "approve".into(),
+            },
+        },
+        yappr::proto::MAX_REQUEST,
+    )
+    .await
+    .unwrap();
+    send.finish().unwrap();
+    // The feed keeps moving while the control reply is flow-controlled.
+    timeout(WAIT, entries.wait_for(|entries| entries.len() == 2))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        timeout(
+            Duration::from_millis(200),
+            saved.wait_for(|stored| stored.through >= 2)
+        )
+        .await
+        .is_err(),
+        "delivery reported the decision before its control reply reached the device"
+    );
+    assert!(!delivering.is_finished());
+    let reply: control::Reply = timeout(
+        WAIT,
+        yappr::proto::read_frame(&mut recv, yappr::proto::MAX_FRAME),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert!(matches!(reply, control::Reply::Accepted { .. }));
+    timeout(WAIT, saved.wait_for(|stored| stored.through >= 2))
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(WAIT, &mut delivering)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drop(receiving);
+    device.close().await;
 }
 
 #[tokio::test]
@@ -753,7 +871,7 @@ async fn a_permission_request_waits_for_the_device_and_returns_its_decision() {
             },
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{value} reply failed: {error:#}"));
         let out = timeout(WAIT, asking).await.unwrap().unwrap();
         assert!(
             out.status.success(),

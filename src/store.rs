@@ -279,8 +279,13 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     builder
         .create(dir)
         .with_context(|| format!("create {}", dir.display()))?;
-    let handle = File::open(dir).with_context(|| format!("open {}", dir.display()))?;
-    make_private(&handle, dir, 0o700)
+    // Windows cannot open a directory as a file.
+    #[cfg(unix)]
+    {
+        let handle = File::open(dir).with_context(|| format!("open {}", dir.display()))?;
+        make_private(&handle, dir, 0o700)?;
+    }
+    Ok(())
 }
 
 /// Open or create a file that only the owner can read. The path must not be a

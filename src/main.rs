@@ -2018,7 +2018,7 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                     .and_then(|entries| choices::get(&entries, &question.id)),
             };
             match state {
-                Ok(state) if state.status == "answered" => {
+                Ok(state) if state.status == QuestionStatus::Answered => {
                     let approved = state.decision.is_some_and(|d| d.value == "approve");
                     Ok(Some(hooks::decision(args.agent, event, approved)))
                 }

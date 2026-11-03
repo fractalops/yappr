@@ -96,7 +96,11 @@ impl Store {
         let (complete_end, last) = last_line(&mut log)?;
         if complete_end != log.metadata()?.len() {
             tracing::warn!("removing a partial entry at byte {complete_end}");
-            log.set_len(complete_end)?;
+            // On Windows, an append handle cannot change the length.
+            OpenOptions::new()
+                .write(true)
+                .open(self.dir.join(LOG))?
+                .set_len(complete_end)?;
         }
         let last_id = match last {
             Some(line) => parse(&line)?.id,

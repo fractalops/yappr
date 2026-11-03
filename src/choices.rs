@@ -59,8 +59,34 @@ enum Record {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuestionState {
     pub question: Question,
-    pub status: String,
+    pub status: QuestionStatus,
     pub decision: Option<Decision>,
+}
+
+/// Where a question is. Only a pending question can get a decision or a
+/// cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionStatus {
+    Pending,
+    Answered,
+    Cancelled,
+    Expired,
+}
+impl QuestionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Answered => "answered",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+        }
+    }
+}
+impl fmt::Display for QuestionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,19 +322,19 @@ impl Tracker {
             {
                 self.states.push(QuestionState {
                     question,
-                    status: "pending".into(),
+                    status: QuestionStatus::Pending,
                     decision: None,
                 });
             }
             Some(Record::Decision { decision }) => {
                 if let Some(state) = self.pending(&decision.question_id) {
-                    state.status = "answered".into();
+                    state.status = QuestionStatus::Answered;
                     state.decision = Some(decision);
                 }
             }
             Some(Record::Cancelled { question_id }) => {
                 if let Some(state) = self.pending(&question_id) {
-                    state.status = "cancelled".into();
+                    state.status = QuestionStatus::Cancelled;
                 }
             }
             _ => {}
@@ -318,7 +344,7 @@ impl Tracker {
     fn pending(&mut self, id: &str) -> Option<&mut QuestionState> {
         self.states
             .iter_mut()
-            .find(|s| s.question.id == id && s.status == "pending")
+            .find(|s| s.question.id == id && s.status == QuestionStatus::Pending)
     }
 
     /// The states now. A pending question past its deadline is expired.
@@ -326,8 +352,10 @@ impl Tracker {
         let now = Timestamp::now();
         let mut states = self.states.clone();
         for state in &mut states {
-            if state.status == "pending" && state.question.expires_at.is_some_and(|t| t <= now) {
-                state.status = "expired".into();
+            if state.status == QuestionStatus::Pending
+                && state.question.expires_at.is_some_and(|t| t <= now)
+            {
+                state.status = QuestionStatus::Expired;
             }
         }
         states
@@ -371,9 +399,9 @@ pub fn decide(store: &Store, responder: EndpointId, submission: Submission) -> R
                 ChoiceError::new("answered", "the question already has a final decision").into(),
             );
         }
-        if state.status != "pending" {
+        if state.status != QuestionStatus::Pending {
             return Err(ChoiceError::new(
-                &state.status,
+                state.status.as_str(),
                 &format!("the question is {}", state.status),
             )
             .into());
@@ -427,10 +455,10 @@ fn decision_title(label: &str) -> String {
 pub fn cancel(store: &Store, id: &str) -> Result<()> {
     store.transaction(|entries| {
         let state = get(entries, id)?;
-        if state.status == "cancelled" {
+        if state.status == QuestionStatus::Cancelled {
             return Ok((None, ()));
         }
-        if state.status != "pending" {
+        if state.status != QuestionStatus::Pending {
             bail!("the question is {}", state.status);
         }
         let entry = draft(

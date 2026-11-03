@@ -96,7 +96,11 @@ impl Store {
         let (complete_end, last) = last_line(&mut log)?;
         if complete_end != log.metadata()?.len() {
             tracing::warn!("removing a partial entry at byte {complete_end}");
-            log.set_len(complete_end)?;
+            // On Windows, an append handle cannot change the length.
+            OpenOptions::new()
+                .write(true)
+                .open(self.dir.join(LOG))?
+                .set_len(complete_end)?;
         }
         let last_id = match last {
             Some(line) => parse(&line)?.id,
@@ -279,8 +283,13 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     builder
         .create(dir)
         .with_context(|| format!("create {}", dir.display()))?;
-    let handle = File::open(dir).with_context(|| format!("open {}", dir.display()))?;
-    make_private(&handle, dir, 0o700)
+    // Windows cannot open a directory as a file.
+    #[cfg(unix)]
+    {
+        let handle = File::open(dir).with_context(|| format!("open {}", dir.display()))?;
+        make_private(&handle, dir, 0o700)?;
+    }
+    Ok(())
 }
 
 /// Open or create a file that only the owner can read. The path must not be a

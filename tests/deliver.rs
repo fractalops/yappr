@@ -342,7 +342,7 @@ async fn the_device_answers_on_the_delivery_connection() {
         "{reply:?}"
     );
     let state = choices::get(&writer.store.entries().unwrap(), &question.id).unwrap();
-    assert_eq!(state.status, "answered");
+    assert_eq!(state.status, yappr::choices::QuestionStatus::Answered);
     // The decision reaches the device too.
     assert_eq!(device.wait_for(2).await[1].kind, "decision");
     delivering.abort();

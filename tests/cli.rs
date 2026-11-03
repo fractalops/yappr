@@ -2,7 +2,6 @@
 //! only (`YAPPR_NETWORK=local`), so no test touches the public relays.
 use std::{
     io::{BufRead, BufReader, Read},
-    path::Path,
     process::{Child, ChildStderr, Command, Stdio},
     str::FromStr,
     time::Duration,
@@ -854,7 +853,7 @@ fn start_writes_nothing_to_stdout_when_it_does_not_pair() {
 #[cfg(unix)]
 #[test]
 fn store_files_are_private() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{os::unix::fs::PermissionsExt, path::Path};
     let m = Machine::new();
     m.post("x", &[]);
     m.id();
@@ -987,6 +986,7 @@ fn exit_0_when_the_reader_of_stdout_stops() {
 }
 
 /// A free UDP port on loopback.
+#[cfg(unix)]
 fn free_port() -> u16 {
     std::net::UdpSocket::bind("127.0.0.1:0")
         .unwrap()

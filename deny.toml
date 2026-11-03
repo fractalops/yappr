@@ -1,0 +1,42 @@
+# Checks for the dependencies: cargo deny check
+
+[graph]
+all-features = true
+
+[advisories]
+# Every RustSec advisory fails the check, including unmaintained crates.
+# Add an ignore entry with a reason only after a review.
+ignore = [
+    # Unmaintained, with no known hole. iroh-relay uses it through postcard
+    # and heapless.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill comes through iroh and has no fix" },
+    # Unmaintained, with no known hole. netwatch uses it through
+    # netlink-packet-core.
+    { id = "RUSTSEC-2024-0436", reason = "paste comes through iroh and has no fix" },
+]
+
+[licenses]
+# Licenses that let the binary ship under MIT OR Apache-2.0. MPL-2.0 applies
+# only to the files of that crate.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

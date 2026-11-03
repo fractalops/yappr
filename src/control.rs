@@ -41,7 +41,8 @@ mod writer {
         protocol::{AcceptError, ProtocolHandler},
         EndpointId,
     };
-    use tokio::task::JoinSet;
+    use n0_future::task::AbortOnDropHandle;
+    use tokio::{sync::watch, task::JoinSet};
 
     use super::{Duration, Reply, Request, IDLE, MAX_CONTROL};
     use crate::{
@@ -59,7 +60,7 @@ mod writer {
     pub struct ChoicesProtocol(pub Store);
     impl ProtocolHandler for ChoicesProtocol {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-            serve(conn, self.0.clone(), false, Some(IDLE)).await;
+            serve(conn, self.0.clone(), false, Some(IDLE), None).await;
             Ok(())
         }
     }
@@ -67,20 +68,54 @@ mod writer {
     /// Answer choice requests on a connection that this writer opened to
     /// deliver its feed, until the connection closes.
     pub async fn answer_on(conn: Connection, store: Store) {
-        serve(conn, store, false, None).await;
+        serve(conn, store, false, None, None).await;
     }
+    /// Count replies until QUIC has delivered them. Delivery shutdown must
+    /// wait for these replies as well as the device's saved-entry reports.
+    pub(crate) fn answer_tracked(
+        conn: Connection,
+        store: Store,
+    ) -> (AbortOnDropHandle<()>, watch::Receiver<usize>) {
+        let (pending, replies) = watch::channel(0);
+        let task = tokio::spawn(serve(conn, store, false, None, Some(pending)));
+        (AbortOnDropHandle::new(task), replies)
+    }
+
+    struct PendingReply(Option<watch::Sender<usize>>);
+    impl PendingReply {
+        fn new(pending: Option<watch::Sender<usize>>) -> Self {
+            if let Some(pending) = &pending {
+                pending.send_modify(|count| *count += 1);
+            }
+            Self(pending)
+        }
+    }
+    impl Drop for PendingReply {
+        fn drop(&mut self) {
+            if let Some(pending) = &self.0 {
+                pending.send_modify(|count| *count -= 1);
+            }
+        }
+    }
+
     #[derive(Debug, Clone)]
     pub struct PairProtocol(pub Store);
     impl ProtocolHandler for PairProtocol {
         async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-            serve(conn, self.0.clone(), true, Some(IDLE)).await;
+            serve(conn, self.0.clone(), true, Some(IDLE), None).await;
             Ok(())
         }
     }
 
     /// Answer requests until the connection closes, or until no request
     /// arrives for `idle`.
-    async fn serve(conn: Connection, store: Store, pair: bool, idle: Option<Duration>) {
+    async fn serve(
+        conn: Connection,
+        store: Store,
+        pair: bool,
+        idle: Option<Duration>,
+        pending: Option<watch::Sender<usize>>,
+    ) {
         let mut requests = JoinSet::new();
         loop {
             // Bound concurrent work. New streams remain flow-controlled by QUIC.
@@ -97,7 +132,11 @@ mod writer {
             while requests.try_join_next().is_some() {}
             let store = store.clone();
             let remote = conn.remote_id();
+            // Count before spawning, so a decision cannot appear in the feed
+            // before its reply is counted. Drop also covers cancellation.
+            let reply = PendingReply::new(pending.clone());
             requests.spawn(async move {
+                let _reply = reply;
                 match n0_future::time::timeout(
                     REQUEST_TIMEOUT,
                     handle(send, recv, store, remote, pair),
@@ -163,6 +202,9 @@ mod writer {
             proto::write_frame(&mut send, &reply, proto::MAX_FRAME).await?;
         }
         send.finish()?;
+        // finish() only queues the response. Closing the connection before
+        // the peer acknowledges it can discard that response.
+        send.stopped().await?;
         Ok(())
     }
     fn public_error(error: anyhow::Error) -> ChoiceError {
@@ -176,6 +218,8 @@ mod writer {
         )
     }
 }
+#[cfg(not(wasm_browser))]
+pub(crate) use writer::answer_tracked;
 #[cfg(not(wasm_browser))]
 pub use writer::{answer_on, ChoicesProtocol, PairProtocol};
 

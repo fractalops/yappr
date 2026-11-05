@@ -112,11 +112,11 @@ yappr hooks install codex
 
 Hook support in Yappr: ☑ supported, ☐ unsupported.
 
-| Hook | Agent | What Yappr does | Select with `--events` |
+| Hook | Agent | What Yappr does | Events |
 |---|---|---|---|
 | ☑ `PermissionRequest` | Claude Code, Codex | Shows an approval request on your phone and returns your decision to the agent | `permission` |
 | ☑ `Stop` | Claude Code, Codex | Sends the agent's last message when its turn ends | `stop` |
-| ☑ `PreToolUse` | Claude Code, Codex | Asks for approval before each matching tool runs | `pretooluse:Bash` |
+| ☑ `PreToolUse` | Claude Code, Codex | Sends a completion update with the tool name and a result summary | `pretooluse:Bash` |
 | ☑ `Notification` | Claude Code | Sends the agent's notification message to your phone | `notification` |
 | ☑ `SubagentStop` | Claude Code, Codex | Sends an update when a subagent finishes | `subagent` |
 | ☑ `SessionStart`, `SessionEnd` | Claude Code, Codex | Sends an update when a session starts or ends | `session` |

@@ -103,19 +103,39 @@ question expires, you cancel it, or an error occurs.
 
 ## Coding agents
 
-yappr can send the permission requests of Claude Code and Codex to your phone.
+Yappr sends updates and approval requests from Claude Code and Codex to your phone.
 
 ```sh
 yappr hooks install claude
 yappr hooks install codex
 ```
 
-When the agent asks to run a command, your phone shows the command. Select
-**Approve** or **Reject**. Claude Code also shows its prompt in the terminal,
-and you can answer there. If you do not answer on the phone in 2 minutes, the
-agent asks in the terminal.
+Hook support in Yappr: ☑ supported, ☐ unsupported.
 
-When the agent finishes, your phone shows its last message.
+| Hook | Agent | What Yappr does | Select with `--events` |
+|---|---|---|---|
+| ☑ `PermissionRequest` | Claude Code, Codex | Shows an approval request on your phone and returns your decision to the agent | `permission` |
+| ☑ `Stop` | Claude Code, Codex | Sends the agent's last message when its turn ends | `stop` |
+| ☑ `PreToolUse` | Claude Code, Codex | Asks for approval before each matching tool runs | `pretooluse:Bash` |
+| ☑ `Notification` | Claude Code | Sends the agent's notification message to your phone | `notification` |
+| ☑ `SubagentStop` | Claude Code, Codex | Sends an update when a subagent finishes | `subagent` |
+| ☑ `SessionStart`, `SessionEnd` | Claude Code, Codex | Sends an update when a session starts or ends | `session` |
+| ☐ `PostToolUse` | Claude Code, Codex | Not implemented | Not available |
+| ☐ `PostToolUseFailure` | Claude Code | Not implemented | Not available |
+
+The default events are `permission,stop`. `--events` replaces this selection.
+
+Ask for approval before each Bash tool call:
+
+```sh
+yappr hooks install claude --events permission,stop,pretooluse:Bash
+```
+
+Include subagent and session updates for a project:
+
+```sh
+yappr hooks install codex --scope project --events permission,stop,subagent,session
+```
 
 Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
 trust the yappr hooks.

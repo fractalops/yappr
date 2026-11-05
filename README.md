@@ -137,8 +137,9 @@ Include subagent and session updates for a project:
 yappr hooks install codex --scope project --events permission,stop,subagent,session
 ```
 
-Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
-trust the yappr hooks.
+> [!TIP]
+> Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
+> trust the yappr hooks.
 
 To remove the hooks, run `yappr hooks remove claude` or
 `yappr hooks remove codex`.

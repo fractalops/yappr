@@ -424,9 +424,9 @@ enum HooksCommand {
         /// receives this feed.
         #[clap(long, value_name = "DEVICE")]
         to: Option<String>,
-        /// The events, such as permission,notification,stop or
-        /// pretooluse:Bash. The default is permission and stop. Claude
-        /// also has notification.
+        /// Comma-separated event[:matcher[:command-pattern]] entries, such as
+        /// permission,stop,posttooluse:Bash:cargo test*. Patterns use * and ?.
+        /// The default is permission and stop.
         #[clap(long)]
         events: Option<String>,
         /// Which settings file to change.
@@ -464,6 +464,9 @@ struct HookArgs {
     /// The device that answers.
     #[clap(long)]
     to: Option<String>,
+    /// The per-event command filters saved by hooks install.
+    #[clap(long, hide = true)]
+    events: Option<String>,
     /// How long to wait for an answer.
     #[clap(long, value_parser = parse_interval, default_value = "2m")]
     timeout: Duration,
@@ -1860,7 +1863,12 @@ fn hooks_command(common: &CommonArgs, command: HooksCommand) -> Result<()> {
                     .as_deref()
                     .map(|m| format!(" ({m})"))
                     .unwrap_or_default();
-                eprintln!("  {}{matcher}: {what}", selected.event.key());
+                let commands = if selected.commands.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", selected.commands.join(" or "))
+                };
+                eprintln!("  {}{matcher}{commands}: {what}", selected.event.key());
             }
             if agent == Agent::Codex {
                 eprintln!("In Codex, run /hooks once and trust the yappr hooks.");
@@ -1954,8 +1962,19 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
         .context("read the hook event")?;
     let input: hooks::Input =
         serde_json::from_str(&text).context("the hook event is not valid JSON")?;
+    let action = match args.events {
+        Some(events) => hooks::plan_selected(
+            args.agent,
+            &input,
+            &hooks::parse_events(args.agent, &events)?,
+        ),
+        None => hooks::plan(args.agent, &input),
+    };
+    if action == Action::Nothing {
+        return Ok(None);
+    }
     let store = common.store()?;
-    match hooks::plan(args.agent, &input) {
+    match action {
         Action::Nothing => Ok(None),
         Action::Post {
             kind,

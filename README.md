@@ -116,20 +116,25 @@ Hook support in Yappr: ☑ supported, ☐ unsupported.
 |---|---|---|---|
 | ☑ `PermissionRequest` | Claude Code, Codex | Shows an approval request on your phone and returns your decision to the agent | `permission` |
 | ☑ `Stop` | Claude Code, Codex | Sends the agent's last message when its turn ends | `stop` |
-| ☑ `PreToolUse` | Claude Code, Codex | Sends a completion update with the tool name and a result summary | `pretooluse:Bash` |
+| ☑ `PreToolUse` | Claude Code, Codex | Asks for approval before each matching tool runs | `pretooluse:Bash:git push*` |
 | ☑ `Notification` | Claude Code | Sends the agent's notification message to your phone | `notification` |
 | ☑ `SubagentStop` | Claude Code, Codex | Sends an update when a subagent finishes | `subagent` |
 | ☑ `SessionStart`, `SessionEnd` | Claude Code, Codex | Sends an update when a session starts or ends | `session` |
-| ☐ `PostToolUse` | Claude Code, Codex | Not implemented | Not available |
-| ☐ `PostToolUseFailure` | Claude Code | Not implemented | Not available |
+| ☑ `PostToolUse` | Claude Code, Codex | Sends a completion update with the tool name and a result summary | `posttooluse:Bash:cargo test*` |
+| ☑ `PostToolUseFailure` | Claude Code | Sends an update with the tool name and error when a tool fails | `posttoolusefailure:Bash:cargo test*` |
 
 The default events are `permission,stop`. `--events` replaces this selection.
 
-Ask for approval before each Bash tool call:
+Ask before pushing, and send test results:
 
 ```sh
-yappr hooks install claude --events permission,stop,pretooluse:Bash
+yappr hooks install claude \
+  --events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
 ```
+
+`--events` accepts `event[:matcher[:command-pattern]]` entries.
+Patterns use `*` for any text and `?` for one character. Repeat an event with
+different patterns to match any of them. See [command filters](docs/reference.md#command-filters) for details.
 
 Include subagent and session updates for a project:
 

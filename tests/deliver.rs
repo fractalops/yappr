@@ -760,6 +760,256 @@ async fn yappr_hook(
     child.wait_with_output().await.unwrap()
 }
 
+/// Run the exact command written to the agent's settings, with its stdin.
+#[cfg(unix)]
+async fn configured_hook(
+    dir: &std::path::Path,
+    home: &std::path::Path,
+    command: &str,
+    stdin: &str,
+) -> std::process::Output {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", command])
+        .current_dir(home)
+        .env("YAPPR_DIR", dir)
+        .env("YAPPR_NETWORK", "local")
+        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+        .env("CODEX_HOME", home.join("codex"))
+        .env_remove("IROH_SECRET")
+        .env_remove("YAPPR_KEY")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .await
+        .unwrap();
+    timeout(WAIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn filtered_hooks_skip_unmatched_commands_and_post_results_for_both_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for agent in ["claude", "codex"] {
+        let args = [
+            "hook",
+            "--agent",
+            agent,
+            "--events",
+            "PostToolUse:Bash:cargo test*",
+        ];
+        for tool_input in [
+            serde_json::json!({"command": "cargo build"}),
+            serde_json::json!({"file_path": "/work/file"}),
+        ] {
+            let event = serde_json::json!({
+                "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": tool_input, "tool_response": "done",
+            })
+            .to_string();
+            let out = yappr_hook(dir.path(), home.path(), &args, &event).await;
+            assert!(out.status.success());
+            assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
+        }
+        assert_eq!(
+            Store::open(dir.path()).unwrap().last_id().unwrap(),
+            if agent == "claude" { 0 } else { 1 }
+        );
+        let event = serde_json::json!({
+            "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "cargo test --release"},
+            "tool_response": if agent == "claude" { serde_json::json!({"stdout": "2 passed"}) } else { serde_json::json!("Exit code: 1\n1 failed") },
+        }).to_string();
+        let out = yappr_hook(dir.path(), home.path(), &args, &event).await;
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
+        let entries = Store::open(dir.path()).unwrap().entries().unwrap();
+        let entry = entries.last().unwrap();
+        assert_eq!(entry.kind, format!("{agent}.tool"));
+        assert!(entry.body.contains("cargo test --release"));
+        assert!(entry.body.contains(if agent == "claude" {
+            "2 passed"
+        } else {
+            "1 failed"
+        }));
+    }
+    let event = r#"{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"cargo test"},"error":"Exit code 1: test failed"}"#;
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &[
+            "hook",
+            "--agent",
+            "claude",
+            "--events",
+            "PostToolUseFailure:Bash:cargo test*",
+        ],
+        event,
+    )
+    .await;
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+    let entries = Store::open(dir.path()).unwrap().entries().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[2].kind, "claude.tool_failure");
+    assert!(entries[2].body.contains("Exit code 1: test failed"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installed_command_filters_deliver_results_and_keep_pretool_approvals() {
+    let (dir, mut device) = cli_writer().await;
+    let home = tempfile::tempdir().unwrap();
+    let events = "permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*,posttooluse:Bash:*test*";
+    let installed = yappr_hook(
+        dir.path(),
+        home.path(),
+        &[
+            "hooks",
+            "install",
+            "claude",
+            "--events",
+            events,
+            "--timeout",
+            "5s",
+        ],
+        "",
+    )
+    .await;
+    assert!(installed.status.success(), "{installed:?}");
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("claude/settings.json")).unwrap())
+            .unwrap();
+    let settings_path = home.path().join("claude/settings.json");
+    let original = std::fs::read(&settings_path).unwrap();
+    let invalid = yappr_hook(
+        dir.path(),
+        home.path(),
+        &[
+            "hooks",
+            "install",
+            "claude",
+            "--events",
+            "permission:Bash:git *",
+        ],
+        "",
+    )
+    .await;
+    assert_eq!(invalid.status.code(), Some(2));
+    assert_eq!(std::fs::read(&settings_path).unwrap(), original);
+    assert_eq!(
+        settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+        1
+    );
+    let post = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let pre = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    for (handler, event_name, command) in [
+        (post, "PostToolUse", "cargo fmt"),
+        (pre, "PreToolUse", "git status"),
+    ] {
+        let event = serde_json::json!({"hook_event_name": event_name, "tool_name": "Bash", "tool_input": {"command": command}}).to_string();
+        let out = configured_hook(dir.path(), home.path(), handler, &event).await;
+        assert!(
+            out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+            "{out:?}"
+        );
+    }
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 0);
+    for (n, command) in [(1, "cargo test --release"), (2, "cargo build")] {
+        let event = serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_response": {"stdout": "done"}}).to_string();
+        let out = configured_hook(dir.path(), home.path(), post, &event).await;
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+        let entries = device.wait_for(n).await;
+        assert_eq!(
+            entries.len(),
+            n,
+            "overlapping filters sent duplicate updates"
+        );
+        assert_eq!(entries[n - 1].kind, "claude.tool");
+        assert!(entries[n - 1].body.contains(command));
+    }
+    let path = dir.path().to_owned();
+    let home_path = home.path().to_owned();
+    let pre = pre.to_owned();
+    let asking = tokio::spawn(async move {
+        configured_hook(&path, &home_path, &pre, r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin main"}}"#).await
+    });
+    let entries = device.wait_for(3).await;
+    let question = choices::question(&entries[2]).unwrap();
+    let conn = device.last.borrow().clone().unwrap();
+    let reply: control::Reply = control::exchange_on(
+        &conn,
+        &control::Request::Submit {
+            submission: Submission {
+                id: choices::random_id(),
+                question_id: question.id,
+                value: "approve".into(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(reply, control::Reply::Accepted { .. }));
+    let out = timeout(WAIT, asking).await.unwrap().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let decision: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        decision["hookSpecificOutput"]["hookEventName"],
+        "PreToolUse"
+    );
+    assert_eq!(
+        decision["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    device.wait_for(4).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installed_patterns_are_quoted_and_never_run_as_shell_commands() {
+    let (dir, _device) = cli_writer().await;
+    let home = tempfile::tempdir().unwrap();
+    let marker = home.path().join("pattern-was-executed");
+    let pattern = format!("echo 'it's literal' $(touch {})", marker.display());
+    let events = format!("posttooluse:Bash:{pattern}");
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &["hooks", "install", "claude", "--events", &events],
+        "",
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("claude/settings.json")).unwrap())
+            .unwrap();
+    let handler = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let event = serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": pattern}, "tool_response": "done"}).to_string();
+    let out = configured_hook(dir.path(), home.path(), handler, &event).await;
+    assert!(
+        out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+        "{out:?}"
+    );
+    assert!(!marker.exists(), "the pattern was executed by the shell");
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 1);
+}
+
 #[tokio::test]
 async fn hooks_install_keeps_other_hooks_and_remove_restores_the_file() {
     let (dir, _device) = cli_writer().await;

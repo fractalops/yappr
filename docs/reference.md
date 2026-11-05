@@ -237,7 +237,9 @@ Feed records use the `choices` extension with type `question`, `decision`, or `c
 
 ```sh
 yappr hooks install claude --to phone --timeout 5m
-yappr hooks install codex --scope project --events permission,stop,pretooluse:Bash
+yappr hooks install claude \
+  --events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
+yappr hooks install codex --scope project --events permission,stop,posttooluse:Bash
 ```
 
 `install` adds the yappr hooks to the settings of the agent. It keeps the other hooks and saves a copy of the old file as `FILE.yappr-backup`.
@@ -261,19 +263,57 @@ The hook command saves the feed directory, the device, and the timeout.
 |---|---|---|
 | `permission` | `PermissionRequest` | Asks for approval and gives the decision to the agent |
 | `pretooluse:TOOL` | `PreToolUse` for a tool, such as `Bash` | Asks for approval before each matching tool runs |
+| `posttooluse[:TOOL]` | `PostToolUse` | Posts `AGENT.tool` with the tool input and result |
+| `posttoolusefailure[:TOOL]` | `PostToolUseFailure`, Claude Code only | Posts `claude.tool_failure` with the tool input and error |
 | `stop` | `Stop` | Posts `AGENT.stop` with the last message of the agent |
 | `subagent` | `SubagentStop` | Posts `AGENT.subagent` |
 | `notification` | `Notification`, Claude Code only | Posts `claude.notification`. It repeats permission requests and stops |
 | `session` | `SessionStart`, `SessionEnd` | Posts `AGENT.session` |
 
 A request shows the tool and its command on the device. Approval allows the tool, and rejection denies it.
-With no answer before the timeout, the hook gives no decision, and the agent asks in the terminal.
+With no answer before the timeout, the hook gives no decision. The agent applies its normal permission rules.
 A hook always exits 0 and writes errors to stderr. An error never blocks the agent.
 
 A post hook saves the entry and returns. Another process delivers it. If no device is reachable, `start` or `retry` delivers it later.
 Bodies longer than 8 KiB are cut.
 
 Codex runs new or changed hooks only after you trust them with `/hooks`. Without trust, Codex skips them and shows no error in `codex exec`.
+
+### Command filters
+
+Each event entry uses `event[:matcher[:command-pattern]]`. The agent applies the matcher, such as `Bash` or `Edit|Write`.
+For `pretooluse`, `posttooluse`, and `posttoolusefailure`, the third field filters `tool_input.command`.
+`PermissionRequest` does not accept a command pattern.
+
+```sh
+yappr hooks install claude \
+  --events 'permission,stop,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*'
+```
+
+Patterns match the whole command text and are case-sensitive. `*` matches any text, including an empty string.
+`?` matches one character. All other characters match literally. Yappr does not interpret shell syntax.
+
+| Pattern | Matches | Does not match |
+|---|---|---|
+| `cargo test` | `cargo test` | `cargo test --release` |
+| `cargo test*` | `cargo test`, `cargo test --release` | `cd app && cargo test` |
+| `*cargo test*` | `cd app && cargo test` | `cargo build` |
+
+A command containing the pattern as quoted text can also match. For example, `*cargo test*` matches `echo "cargo test"`.
+These filters select hook actions by text. They do not identify every command that a shell can execute.
+
+Repeat the same event and matcher to accept any listed pattern. Overlapping patterns produce one hook action.
+An entry without a command pattern accepts all calls for its matcher. Calls without a string `tool_input.command` do not match a command pattern.
+Other events keep their selected behavior. `--events` replaces the default selection, so include `permission,stop` to retain those hooks.
+
+Quote the `--events` argument to protect spaces, wildcards, and `|` from the shell.
+Colons after the matcher stay in the command pattern, so URLs and drive paths work.
+Commas separate event entries and cannot appear inside a command pattern. Each pattern can contain at most 4096 bytes.
+
+`PostToolUse` sends a completion update with the tool input and result. Structured results use JSON.
+Tool input is limited to 2 KiB to leave room for the result within the 8 KiB body limit.
+Claude Code uses `PostToolUseFailure` for tool failures. Codex also reports unsuccessful Bash commands through `PostToolUse`.
+Yappr preserves the reported result and does not infer an exit code when the agent provides none.
 
 ## Pairing and access
 

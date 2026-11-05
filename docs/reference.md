@@ -302,13 +302,18 @@ Patterns match the whole command text and are case-sensitive. `*` matches any te
 A command containing the pattern as quoted text can also match. For example, `*cargo test*` matches `echo "cargo test"`.
 These filters select hook actions by text. They do not identify every command that a shell can execute.
 
-Repeat the same event and matcher to accept any listed pattern. Overlapping patterns produce one hook action.
+Use one matcher per event. Combine tool names with `|`, such as `Bash|Read`.
+Repeat the same event and matcher to accept any listed command pattern. Overlapping patterns produce one hook action.
+Yappr rejects different matchers for the same event before changing the settings file.
 An entry without a command pattern accepts all calls for its matcher. Calls without a string `tool_input.command` do not match a command pattern.
 Other events keep their selected behavior. `--events` replaces the default selection, so include `permission,stop` to retain those hooks.
 
 Quote the `--events` argument to protect spaces, wildcards, and `|` from the shell.
-Colons after the matcher stay in the command pattern, so URLs and drive paths work.
-Commas separate event entries and cannot appear inside a command pattern. Each pattern can contain at most 4096 bytes.
+The matcher can contain regex groups and character classes. Colons inside them stay in the matcher, such as `(?:Bash|Write)` or `[a:z]`.
+Escape a literal colon outside them as `\:`, such as `posttooluse:mcp__server\:tool`.
+The next unescaped colon outside groups and classes starts the command pattern.
+Further colons stay in the command pattern, so URLs and drive paths work.
+Commas separate event entries and cannot appear inside a matcher or command pattern. Each command pattern can contain at most 4096 bytes.
 
 `PostToolUse` sends a completion update with the tool input and result. Structured results use JSON.
 Tool input is limited to 2 KiB to leave room for the result within the 8 KiB body limit.

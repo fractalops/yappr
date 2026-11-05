@@ -892,21 +892,21 @@ async fn installed_command_filters_deliver_results_and_keep_pretool_approvals() 
             .unwrap();
     let settings_path = home.path().join("claude/settings.json");
     let original = std::fs::read(&settings_path).unwrap();
-    let invalid = yappr_hook(
-        dir.path(),
-        home.path(),
-        &[
-            "hooks",
-            "install",
-            "claude",
-            "--events",
-            "permission:Bash:git *",
-        ],
-        "",
-    )
-    .await;
-    assert_eq!(invalid.status.code(), Some(2));
-    assert_eq!(std::fs::read(&settings_path).unwrap(), original);
+    for events in [
+        "permission:Bash:git *",
+        "posttooluse:Bash:cargo test*,posttooluse:Bash|Read:*test*",
+        "pretooluse:Bash:git push*,pretooluse:Bash|Read:git *",
+    ] {
+        let invalid = yappr_hook(
+            dir.path(),
+            home.path(),
+            &["hooks", "install", "claude", "--events", events],
+            "",
+        )
+        .await;
+        assert_eq!(invalid.status.code(), Some(2), "{invalid:?}");
+        assert_eq!(std::fs::read(&settings_path).unwrap(), original);
+    }
     assert_eq!(
         settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
         1
@@ -1077,6 +1077,41 @@ async fn hooks_install_keeps_other_hooks_and_remove_restores_the_file() {
     .unwrap();
     assert!(value["hooks"].get("Notification").is_none());
     assert!(value["hooks"].get("PermissionRequest").is_some());
+}
+
+#[tokio::test]
+async fn installed_regex_matchers_keep_their_colons() {
+    let (dir, _device) = cli_writer().await;
+    let home = tempfile::tempdir().unwrap();
+    let events = r"permission:(?:Bash|Write),pretooluse:(?:Bash|Write):git push*,posttooluse:mcp__server\:tool:curl https://host/*";
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &["hooks", "install", "claude", "--events", events],
+        "",
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.path().join("claude/settings.json")).unwrap())
+            .unwrap();
+    for (event, matcher) in [
+        ("PermissionRequest", "(?:Bash|Write)"),
+        ("PreToolUse", "(?:Bash|Write)"),
+        ("PostToolUse", r"mcp__server\:tool"),
+    ] {
+        assert_eq!(settings["hooks"][event][0]["matcher"], matcher);
+    }
+    assert!(
+        !settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--events")
+    );
+    assert!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains("PreToolUse:(?:Bash|Write):git push*"));
 }
 
 #[tokio::test]

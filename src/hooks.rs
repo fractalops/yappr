@@ -157,11 +157,13 @@ impl Selected {
 pub fn parse_events(agent: Agent, text: &str) -> Result<Vec<Selected>> {
     let mut out: Vec<Selected> = Vec::new();
     for item in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        // A command may contain colons, such as an HTTPS URL or a drive path.
-        let mut fields = item.splitn(3, ':');
-        let name = fields.next().unwrap_or_default().trim();
-        let matcher = fields.next().map(str::trim);
-        let pattern = fields.next().map(str::trim);
+        let (name, matcher, pattern) = match item.split_once(':') {
+            Some((name, rest)) => {
+                let (matcher, pattern) = split_matcher(rest);
+                (name.trim(), Some(matcher.trim()), pattern.map(str::trim))
+            }
+            None => (item, None, None),
+        };
         if matcher == Some("") || pattern == Some("") {
             bail!("use event:matcher:command-pattern with no empty fields");
         }
@@ -193,34 +195,78 @@ pub fn parse_events(agent: Agent, text: &str) -> Result<Vec<Selected>> {
                 }
                 command_regex(pattern)?;
             }
-            let matcher = matcher.map(str::to_string);
-            if let Some(selected) = out
-                .iter_mut()
-                .find(|s| s.event == event && s.matcher == matcher)
-            {
-                match pattern {
-                    None => selected.commands.clear(),
-                    Some(pattern)
-                        if !selected.commands.is_empty()
-                            && !selected.commands.iter().any(|p| p == pattern) =>
-                    {
-                        selected.commands.push(pattern.to_string())
-                    }
-                    _ => {}
-                }
-            } else {
-                out.push(Selected {
+            merge_selection(
+                &mut out,
+                Selected {
                     event,
-                    matcher,
+                    matcher: matcher.map(str::to_string),
                     commands: pattern.map(str::to_string).into_iter().collect(),
-                });
-            }
+                },
+            )?;
         }
     }
     if out.is_empty() {
         bail!("give at least one event");
     }
     Ok(out)
+}
+
+/// A separator is an unescaped colon outside regex groups and classes.
+/// Keep regex escapes intact for the agent. Everything after the separator
+/// belongs to the command pattern, including any further colons.
+fn split_matcher(text: &str) -> (&str, Option<&str>) {
+    let mut escaped = false;
+    let mut class = false;
+    let mut depth = 0usize;
+    for (offset, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if class {
+            if c == ']' {
+                class = false;
+            }
+            continue;
+        }
+        match c {
+            '[' => class = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ':' if depth == 0 => return (&text[..offset], Some(&text[offset + 1..])),
+            _ => {}
+        }
+    }
+    (text, None)
+}
+
+/// One matcher per event gives each call one Yappr handler. More tools can
+/// share a matcher, such as Bash|Read, and command patterns combine with OR.
+fn merge_selection(events: &mut Vec<Selected>, selected: Selected) -> Result<()> {
+    if let Some(existing) = events.iter_mut().find(|s| s.event == selected.event) {
+        if existing.matcher != selected.matcher {
+            bail!(
+                "use one matcher for {}. Combine alternatives with |, or repeat the same matcher",
+                selected.event.key()
+            );
+        }
+        if selected.commands.is_empty() {
+            existing.commands.clear();
+        } else if !existing.commands.is_empty() {
+            for command in selected.commands {
+                if !existing.commands.contains(&command) {
+                    existing.commands.push(command);
+                }
+            }
+        }
+    } else {
+        events.push(selected);
+    }
+    Ok(())
 }
 
 /// Literal whole-command matching, with only `*` and `?` as wildcards.
@@ -540,6 +586,12 @@ pub fn install(
     command_for: impl Fn(Event) -> String,
     ask_timeout: u64,
 ) -> Result<()> {
+    // Validate and merge before changing any existing settings. Callers may
+    // construct selections directly rather than through parse_events.
+    let mut selections = Vec::new();
+    for selected in events {
+        merge_selection(&mut selections, selected.clone())?;
+    }
     remove(settings);
     let Some(root) = settings.as_object_mut() else {
         bail!("the settings file is not a JSON object");
@@ -550,7 +602,7 @@ pub fn install(
     let Some(hooks) = hooks.as_object_mut() else {
         bail!("\"hooks\" in the settings file is not a JSON object");
     };
-    for selected in events {
+    for selected in &selections {
         let groups = hooks
             .entry(selected.event.key())
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -867,6 +919,82 @@ mod tests {
                 .commands
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn regex_matchers_keep_colons_and_round_trip_with_command_filters() {
+        for (selection, matcher, commands) in [
+            ("pretooluse:(?:Bash|Write)", "(?:Bash|Write)", vec![]),
+            ("permission:(?:Bash|Write)", "(?:Bash|Write)", vec![]),
+            ("pretooluse:(?i:Bash)", "(?i:Bash)", vec![]),
+            ("pretooluse:[B:ash]+", "[B:ash]+", vec![]),
+            (
+                r"pretooluse:mcp__server\:tool",
+                r"mcp__server\:tool",
+                vec![],
+            ),
+            (
+                "pretooluse:(?:Bash|Write):git push*",
+                "(?:Bash|Write)",
+                vec!["git push*"],
+            ),
+            (
+                r"posttooluse:mcp__server\:tool:curl https://host/*",
+                r"mcp__server\:tool",
+                vec!["curl https://host/*"],
+            ),
+            (
+                r"posttooluse:Bash\\:cargo test*",
+                r"Bash\\",
+                vec!["cargo test*"],
+            ),
+        ] {
+            let events = parse_events(Agent::Claude, selection).unwrap();
+            assert_eq!(events[0].matcher.as_deref(), Some(matcher), "{selection}");
+            assert_eq!(events[0].commands, commands, "{selection}");
+            assert_eq!(
+                parse_events(Agent::Claude, &events[0].selector()).unwrap(),
+                events
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_event_matchers_cannot_install_duplicate_actions() {
+        for value in [
+            "posttooluse:Bash:cargo test*,posttooluse:Bash|Read:*test*",
+            "pretooluse:Bash:git push*,pretooluse:Bash|Read:git *",
+            "posttooluse,posttooluse:Bash:cargo test*",
+        ] {
+            let error = parse_events(Agent::Claude, value).unwrap_err().to_string();
+            assert!(error.contains("one matcher"), "{error}");
+        }
+        // Direct callers of install must get the same check, before existing
+        // settings or hooks are changed.
+        let mut events = parse_events(Agent::Claude, "posttooluse:Bash:cargo test*").unwrap();
+        events.extend(parse_events(Agent::Claude, "posttooluse:Bash|Read:*test*").unwrap());
+        let mut settings =
+            json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}});
+        let original = settings.clone();
+        assert!(install(&mut settings, &events, |_| String::new(), 120).is_err());
+        assert_eq!(settings, original);
+
+        let combined = parse_events(
+            Agent::Claude,
+            "posttooluse:Bash|Read:cargo test*,posttooluse:Bash|Read:*test*",
+        )
+        .unwrap();
+        install(
+            &mut settings,
+            &combined,
+            |_| command("yappr", "/feed", Agent::Claude, None, 120),
+            120,
+        )
+        .unwrap();
+        assert_eq!(
+            settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+            1
+        );
     }
 
     #[test]

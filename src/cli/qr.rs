@@ -47,15 +47,8 @@ pub(super) fn print_qr(text: &str) -> Result<()> {
 
 /// The number of columns of the terminal on stderr, if it is known.
 fn terminal_width() -> Option<usize> {
-    #[cfg(unix)]
-    {
-        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-        // SAFETY: TIOCGWINSZ writes a winsize into `size`, which is valid.
-        let ok = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
-        (ok && size.ws_col > 0).then_some(size.ws_col as usize)
-    }
-    #[cfg(not(unix))]
-    None
+    let (terminal_size::Width(width), _) = terminal_size::terminal_size_of(io::stderr())?;
+    (width > 0).then_some(usize::from(width))
 }
 
 /// The text of a QR code of `text` in `style`, with a line break after each

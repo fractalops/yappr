@@ -8,7 +8,10 @@ use iroh::{
 use jiff::{SignedDuration, Timestamp};
 use std::{
     process::Command,
-    sync::{Arc, Barrier},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Barrier,
+    },
     time::Duration,
 };
 use tokio::time::timeout;
@@ -55,19 +58,72 @@ async fn setup() -> (tempfile::TempDir, Store, Server, Endpoint) {
     (dir, store, server, peer)
 }
 
+/// A loopback proxy that can drop replies from the server. Only one client
+/// uses each proxy, so the source address identifies the direction.
+async fn packet_loss_proxy(
+    server: iroh::EndpointAddr,
+    drop_replies: Arc<AtomicBool>,
+    dropped: Arc<AtomicUsize>,
+) -> (iroh::EndpointAddr, n0_future::task::AbortOnDropHandle<()>) {
+    let server_ip = *server.ip_addrs().next().unwrap();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = iroh::EndpointAddr::new(server.id).with_ip_addr(socket.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut peer_ip = None;
+        let mut buffer = vec![0; 65536];
+        loop {
+            let (len, from) = socket.recv_from(&mut buffer).await.unwrap();
+            if from == server_ip {
+                if drop_replies.load(Ordering::SeqCst) {
+                    dropped.fetch_add(1, Ordering::SeqCst);
+                } else if let Some(to) = peer_ip {
+                    socket.send_to(&buffer[..len], to).await.unwrap();
+                }
+            } else {
+                peer_ip = Some(from);
+                socket.send_to(&buffer[..len], server_ip).await.unwrap();
+            }
+        }
+    });
+    (addr, n0_future::task::AbortOnDropHandle::new(task))
+}
+
 #[tokio::test]
 async fn revoked_stalled_request_does_not_read_a_new_entry() {
+    stalled_request_is_revoked(false).await;
+}
+
+#[tokio::test]
+async fn revoked_stalled_request_handles_a_lost_denial_packet() {
+    stalled_request_is_revoked(true).await;
+}
+
+async fn stalled_request_is_revoked(lose_denial: bool) {
     let (_dir, store, server, peer) = setup().await;
-    let conn = peer
-        .connect(server.addr().await, yappr::ALPN)
-        .await
-        .unwrap();
+    let drop_replies = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let (addr, _proxy) = if lose_denial {
+        let (addr, proxy) =
+            packet_loss_proxy(server.addr().await, drop_replies.clone(), dropped.clone()).await;
+        (addr, Some(proxy))
+    } else {
+        (server.addr().await, None)
+    };
+    let conn = peer.connect(addr, yappr::ALPN).await.unwrap();
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
     send.write_all(&[0]).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
+    drop_replies.store(lose_denial, Ordering::SeqCst);
     store.allow_list().deny(&peer.id()).unwrap();
     store.append(draft("private entry after denial")).unwrap();
     tokio::time::sleep(Duration::from_millis(5500)).await;
+    drop_replies.store(false, Ordering::SeqCst);
+    if lose_denial {
+        assert!(
+            dropped.load(Ordering::SeqCst) > 0,
+            "no packets were dropped"
+        );
+    }
     let bytes = serde_json::to_vec(&Request {
         follow: false,
         ..Default::default()
@@ -97,8 +153,8 @@ async fn revoked_stalled_request_does_not_read_a_new_entry() {
     } else {
         None
     };
-    // The server closes the connection because of the denial, not for
-    // another reason.
+    // A lost denial packet can leave only a stateless reset once the server
+    // discards the closed connection. Both outcomes must prevent reads.
     let reason = timeout(Duration::from_secs(5), conn.closed()).await;
     conn.close(VarInt::from_u32(0), b"review complete");
     peer.close().await;
@@ -108,12 +164,13 @@ async fn revoked_stalled_request_does_not_read_a_new_entry() {
         "a revoked device read a new entry"
     );
     assert!(
-        matches!(
-            reason,
-            Ok(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
-                if close.error_code == VarInt::from_u32(proto::DENIED_CODE)
-        ),
-        "the server did not close the connection as denied: {reason:?}"
+        matches!(reason, Ok(iroh::endpoint::ConnectionError::Reset))
+            || matches!(
+                reason,
+                Ok(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
+                    if close.error_code == VarInt::from_u32(proto::DENIED_CODE)
+            ),
+        "the revoked connection did not close as denied or reset: {reason:?}"
     );
 }
 

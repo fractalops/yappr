@@ -103,25 +103,48 @@ question expires, you cancel it, or an error occurs.
 
 ## Coding agents
 
-yappr can send the permission requests of Claude Code and Codex to your phone.
+Yappr sends updates and approval requests from Claude Code and Codex to your phone.
 
 ```sh
+# Install approval and turn-end hooks
 yappr hooks install claude
 yappr hooks install codex
+
+# Ask before pushing and send test results
+yappr hooks install claude \
+  --events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
+
+# Include subagent and session updates for this project
+yappr hooks install codex --scope project --events permission,stop,subagent,session
+
+# Remove Yappr hooks
+yappr hooks remove claude
+yappr hooks remove codex
 ```
 
-When the agent asks to run a command, your phone shows the command. Select
-**Approve** or **Reject**. Claude Code also shows its prompt in the terminal,
-and you can answer there. If you do not answer on the phone in 2 minutes, the
-agent asks in the terminal.
+The default events are `permission,stop`. `--events` replaces this selection.
 
-When the agent finishes, your phone shows its last message.
+> [!TIP]
+> `--events` accepts `event[:matcher[:command-pattern]]` entries.
+> Patterns use `*` for any text and `?` for one character. Repeat an event with
+> different patterns to match any of them. See [command filters](docs/reference.md#command-filters) for details.
 
-Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
-trust the yappr hooks.
+> [!TIP]
+> Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
+> trust the yappr hooks.
 
-To remove the hooks, run `yappr hooks remove claude` or
-`yappr hooks remove codex`.
+Hook support in Yappr: ☑ supported, ☐ unsupported.
+
+| Hook | Agent | What Yappr does |
+|---|---|---|
+| ☑ `PermissionRequest` | Claude Code, Codex | Shows an approval request on your phone and returns your decision to the agent |
+| ☑ `Stop` | Claude Code, Codex | Sends the agent's last message when its turn ends |
+| ☑ `PreToolUse` | Claude Code, Codex | Asks for approval before each matching tool runs |
+| ☑ `Notification` | Claude Code | Sends the agent's notification message to your phone |
+| ☑ `SubagentStop` | Claude Code, Codex | Sends an update when a subagent finishes |
+| ☑ `SessionStart`, `SessionEnd` | Claude Code, Codex | Sends an update when a session starts or ends |
+| ☑ `PostToolUse` | Claude Code, Codex | Sends a completion update with the tool name and a result summary |
+| ☑ `PostToolUseFailure` | Claude Code | Sends an update with the tool name and error when a tool fails |
 
 ## Reference
 

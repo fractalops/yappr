@@ -109,7 +109,7 @@ async fn stalled_request_is_revoked(lose_denial: bool) {
     } else {
         (server.addr().await, None)
     };
-    let conn = peer.connect(addr, yappr::ALPN).await.unwrap();
+    let conn = peer.connect(addr.clone(), yappr::ALPN).await.unwrap();
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
     send.write_all(&[0]).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -121,7 +121,10 @@ async fn stalled_request_is_revoked(lose_denial: bool) {
     if lose_denial {
         assert!(
             dropped.load(Ordering::SeqCst) > 0,
-            "no packets were dropped"
+            "no packets were dropped; target {addr:?}; server {:?}; paths {:?}; close {:?}",
+            server.addr().await,
+            conn.paths(),
+            conn.close_reason(),
         );
     }
     let bytes = serde_json::to_vec(&Request {

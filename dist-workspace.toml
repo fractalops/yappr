@@ -22,6 +22,10 @@ github-attestations = true
 # Run the tests on the tagged commit before the build
 plan-jobs = ["./ci"]
 
+# GitHub retired the Apple Silicon macos-14 runner used by dist's defaults.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 # The actions of release.yml, pinned to the commits of these tags
 [dist.github-action-commits]
 "actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803" # v6.1.0

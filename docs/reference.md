@@ -277,6 +277,9 @@ A hook always exits 0 and writes errors to stderr. An error never blocks the age
 A post hook saves the entry and returns. Another process delivers it. If no device is reachable, `start` or `retry` delivers it later.
 Bodies longer than 8 KiB are cut.
 
+Hook input is limited to 1 MiB. Larger events can fail decoding and produce no question or update.
+Yappr reports the error on stderr and gives no approval decision.
+
 Codex runs new or changed hooks only after you trust them with `/hooks`. Without trust, Codex skips them and shows no error in `codex exec`.
 
 ### Command filters

@@ -58,30 +58,37 @@ async fn setup() -> (tempfile::TempDir, Store, Server, Endpoint) {
     (dir, store, server, peer)
 }
 
-/// A loopback proxy that can drop replies from the server. Only one client
-/// uses each proxy, so the source address identifies the direction.
+/// A proxy between an IPv6-only client and an IPv4-only server. Different
+/// IP families prevent iroh from opening a direct path around packet loss.
 async fn packet_loss_proxy(
     server: iroh::EndpointAddr,
     drop_replies: Arc<AtomicBool>,
     dropped: Arc<AtomicUsize>,
 ) -> (iroh::EndpointAddr, n0_future::task::AbortOnDropHandle<()>) {
     let server_ip = *server.ip_addrs().next().unwrap();
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = iroh::EndpointAddr::new(server.id).with_ip_addr(socket.local_addr().unwrap());
+    let client_socket = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+    let server_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = iroh::EndpointAddr::new(server.id).with_ip_addr(client_socket.local_addr().unwrap());
     let task = tokio::spawn(async move {
         let mut peer_ip = None;
-        let mut buffer = vec![0; 65536];
+        let mut from_client = vec![0; 65536];
+        let mut from_server = vec![0; 65536];
         loop {
-            let (len, from) = socket.recv_from(&mut buffer).await.unwrap();
-            if from == server_ip {
-                if drop_replies.load(Ordering::SeqCst) {
-                    dropped.fetch_add(1, Ordering::SeqCst);
-                } else if let Some(to) = peer_ip {
-                    socket.send_to(&buffer[..len], to).await.unwrap();
+            tokio::select! {
+                received = server_socket.recv_from(&mut from_server) => {
+                    let (len, from) = received.unwrap();
+                    assert_eq!(from, server_ip);
+                    if drop_replies.load(Ordering::SeqCst) {
+                        dropped.fetch_add(1, Ordering::SeqCst);
+                    } else if let Some(to) = peer_ip {
+                        client_socket.send_to(&from_server[..len], to).await.unwrap();
+                    }
                 }
-            } else {
-                peer_ip = Some(from);
-                socket.send_to(&buffer[..len], server_ip).await.unwrap();
+                received = client_socket.recv_from(&mut from_client) => {
+                    let (len, from) = received.unwrap();
+                    peer_ip = Some(from);
+                    server_socket.send_to(&from_client[..len], server_ip).await.unwrap();
+                }
             }
         }
     });
@@ -100,6 +107,22 @@ async fn revoked_stalled_request_handles_a_lost_denial_packet() {
 
 async fn stalled_request_is_revoked(lose_denial: bool) {
     let (_dir, store, server, peer) = setup().await;
+    let peer = if lose_denial {
+        store.allow_list().deny(&peer.id()).unwrap();
+        peer.close().await;
+        let peer = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .clear_ip_transports()
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind_addr("[::1]:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        store.allow_list().allow(peer.id()).unwrap();
+        peer
+    } else {
+        peer
+    };
     let drop_replies = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(AtomicUsize::new(0));
     let (addr, _proxy) = if lose_denial {

@@ -386,8 +386,8 @@ yappr join YAPPR:... --name laptop --alias computer
 ```
 
 Replace `YAPPR:...` with the code from the writing computer.
-Compare the receiving computer's ID with the ID in the writing computer's terminal.
-If they match, enter `y` in the writing computer's terminal.
+Both terminals show a check code, such as `881 331`.
+If the codes match, enter `y` in the writing computer's terminal.
 It saves the receiving device as `laptop`. The receiving device saves the writer as `computer`.
 
 On the receiving computer, read the feed and wait for new entries:

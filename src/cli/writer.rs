@@ -235,6 +235,10 @@ async fn start_serving(
     let store = common.store()?;
     let lock = disk::try_lock(store.dir(), SERVE_LOCK)?
         .with_context(|| format!("yappr start already runs for {}", store.dir().display()))?;
+    // A failed write can leave a pairing acceptance unfinished.
+    if let Err(e) = yappr::pairing::recover(&store) {
+        eprintln!("Warning: cannot finish an earlier pairing: {e:#}");
+    }
     let opts = common.net(port)?;
     let wait_for_relay = opts.network == Network::Default && !opts.relays.disabled;
     let server = Server::spawn(store.clone(), common.secret()?, opts).await?;

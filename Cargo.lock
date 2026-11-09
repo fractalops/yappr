@@ -4256,6 +4256,7 @@ name = "yappr"
 version = "0.1.6"
 dependencies = [
  "anyhow",
+ "blake3",
  "cfg_aliases",
  "clap",
  "data-encoding",

@@ -18,6 +18,32 @@ pub const ALPN: &[u8] = b"yappr/pair/1";
 /// its result. New claims and confirmations still end at the deadline.
 pub const RESULT_WINDOW: jiff::SignedDuration = jiff::SignedDuration::from_secs(120);
 
+/// The status of an invitation that the writer accepted, before the device is
+/// in the allow list. A failed write can leave this status. The next pairing
+/// operation, or the next `yappr start`, finishes the acceptance.
+#[cfg(not(wasm_browser))]
+const ACCEPTING: &str = "accepting";
+
+/// The check code that the writer and the device show while the writer
+/// decides. Both sides compute it from the writer's id, the device's id, and
+/// the invitation token. If the codes are the same, the device that claimed the
+/// invitation is the device in your hand.
+///
+/// The writer keeps the first device that claims an invitation, and a device
+/// shows the code only after its own claim. So another device that claims
+/// first cannot make your device show a matching code.
+pub fn check_code(writer: EndpointId, device: EndpointId, token: &str) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("yappr pairing check code 1");
+    hasher.update(writer.as_bytes());
+    hasher.update(device.as_bytes());
+    hasher.update(token.as_bytes());
+    let hash = hasher.finalize();
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&hash.as_bytes()[..8]);
+    let n = u64::from_be_bytes(first) % 1_000_000;
+    format!("{:03} {:03}", n / 1000, n % 1000)
+}
+
 /// The end of the result window of `offer`.
 #[cfg(not(wasm_browser))]
 fn result_until(offer: &Offer) -> Timestamp {
@@ -234,6 +260,8 @@ pub fn create(
     let _lock = disk::lock(store.dir(), "pairing.lock")?;
     let path = store.dir().join("pairing.json");
     let mut offers: Offers = disk::read(&path)?;
+    // Finish an interrupted acceptance before old invitations are removed.
+    finish_accepting(store, &mut offers)?;
     offers
         .offers
         .retain(|_, o| result_until(o) > Timestamp::now());
@@ -317,6 +345,14 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
     let _lock = disk::lock(store.dir(), "pairing.lock")?;
     let path = store.dir().join("pairing.json");
     let mut offers: Offers = disk::read(&path)?;
+    // If this fails, the device keeps waiting and asks again.
+    let finished = match finish_accepting(store, &mut offers) {
+        Ok(finished) => finished,
+        Err(e) => {
+            tracing::warn!("cannot finish a pairing acceptance: {e:#}");
+            false
+        }
+    };
     let offer = offers
         .offers
         .get_mut(&request.token)
@@ -345,8 +381,14 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
             true
         }
     };
+    // A device knows "pending", "accepted" and "rejected". An acceptance that
+    // is not finished is still "pending" for the device.
+    let status = match offer.status.as_str() {
+        ACCEPTING => "pending".to_string(),
+        other => other.to_string(),
+    };
     let reply = PairReply {
-        status: offer.status.clone(),
+        status,
         message: match offer.status.as_str() {
             "accepted" => "The writer allowed this device.",
             "rejected" => "The writer rejected this device.",
@@ -355,7 +397,7 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
         .into(),
     };
     // The device asks again each second. Write only the first claim.
-    if claimed {
+    if claimed || finished {
         disk::write(&path, &offers)?;
     }
     Ok(reply)
@@ -375,11 +417,51 @@ pub fn confirm(store: &Store, remote: EndpointId, accept: bool) -> Result<()> {
                 && o.candidate.as_ref().is_some_and(|c| c.id == remote)
         })
         .context("this device has no pending pairing request")?;
-    if accept {
-        store.allow_list().allow(remote)?;
+    if !accept {
+        offer.status = "rejected".into();
+        return disk::write(&path, &offers);
     }
-    offer.status = if accept { "accepted" } else { "rejected" }.into();
+    // Save the decision first. Then a failure in the next steps leaves a
+    // decision that the next pairing operation finishes, not a device in the
+    // allow list with an invitation that still waits.
+    offer.status = ACCEPTING.into();
+    disk::write(&path, &offers)?;
+    finish_accepting(store, &mut offers)?;
     disk::write(&path, &offers)
+}
+
+/// Finish the acceptances that a failed write interrupted: add each device to
+/// the allow list, then mark its invitation "accepted". Returns true if an
+/// invitation changed. The caller holds `pairing.lock` and saves `offers`.
+#[cfg(not(wasm_browser))]
+fn finish_accepting(store: &Store, offers: &mut Offers) -> Result<bool> {
+    let mut changed = false;
+    for offer in offers.offers.values_mut().filter(|o| o.status == ACCEPTING) {
+        let candidate = offer
+            .candidate
+            .as_ref()
+            .context("an accepted pairing invitation has no device")?;
+        store.allow_list().allow(candidate.id)?;
+        offer.status = "accepted".into();
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// Finish the acceptances that a failed write interrupted. `yappr start` calls
+/// this, so that the allow list and the invitations agree.
+#[cfg(not(wasm_browser))]
+pub fn recover(store: &Store) -> Result<()> {
+    let _lock = disk::lock(store.dir(), "pairing.lock")?;
+    let path = store.dir().join("pairing.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut offers: Offers = disk::read(&path)?;
+    if finish_accepting(store, &mut offers)? {
+        disk::write(&path, &offers)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(wasm_browser))]
@@ -459,6 +541,100 @@ mod tests {
             .candidate
             .unwrap();
         assert_eq!(candidate.ticket, join_with(phone).ticket);
+    }
+
+    #[test]
+    fn a_check_code_is_six_digits_and_covers_both_devices_and_the_token() {
+        let key = |n: u8| iroh::SecretKey::from_bytes(&[n; 32]).public();
+        let (writer, phone, other) = (key(1), key(2), key(3));
+        let token = "ab".repeat(32);
+        let code = check_code(writer, phone, &token);
+        assert_eq!(code.len(), 7);
+        assert!(code[..3].bytes().all(|b| b.is_ascii_digit()));
+        assert_eq!(&code[3..4], " ");
+        assert!(code[4..].bytes().all(|b| b.is_ascii_digit()));
+        // The writer and the device compute it on their own.
+        assert_eq!(code, check_code(writer, phone, &token));
+        assert_ne!(code, check_code(writer, other, &token));
+        assert_ne!(code, check_code(other, phone, &token));
+        assert_ne!(code, check_code(phone, writer, &token));
+        assert_ne!(code, check_code(writer, phone, &"cd".repeat(32)));
+    }
+
+    /// An invitation that a device claimed and that the writer accepted, but
+    /// the write failed before the device was in the allow list.
+    #[cfg(not(wasm_browser))]
+    fn interrupted_acceptance() -> (tempfile::TempDir, Store, EndpointId, Join) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let writer = iroh::SecretKey::generate().public();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(writer)).to_string();
+        let expires_at = Timestamp::now() + jiff::SignedDuration::from_secs(60);
+        let invitation = create(&store, ticket, "Mac".into(), expires_at).unwrap();
+        let phone = iroh::SecretKey::generate().public();
+        let request = Join {
+            token: invitation.token.clone(),
+            name: "Phone".into(),
+            ticket: None,
+        };
+        join(&store, phone, request.clone()).unwrap();
+        let path = store.dir().join("pairing.json");
+        let mut offers: Offers = disk::read(&path).unwrap();
+        offers.offers.get_mut(&invitation.token).unwrap().status = ACCEPTING.into();
+        disk::write(&path, &offers).unwrap();
+        assert!(!store.allow_list().contains(&phone));
+        (dir, store, phone, request)
+    }
+
+    #[cfg(not(wasm_browser))]
+    #[test]
+    fn the_next_ask_of_the_device_finishes_an_interrupted_acceptance() {
+        let (_dir, store, phone, request) = interrupted_acceptance();
+        let reply = join(&store, phone, request.clone()).unwrap();
+        assert_eq!(reply.status, "accepted");
+        assert!(store.allow_list().contains(&phone));
+        assert_eq!(get(store.dir(), &request.token).unwrap().status, "accepted");
+    }
+
+    #[cfg(not(wasm_browser))]
+    #[test]
+    fn start_finishes_an_interrupted_acceptance() {
+        let (_dir, store, phone, request) = interrupted_acceptance();
+        recover(&store).unwrap();
+        assert!(store.allow_list().contains(&phone));
+        assert_eq!(get(store.dir(), &request.token).unwrap().status, "accepted");
+        // A second run changes nothing.
+        recover(&store).unwrap();
+    }
+
+    #[cfg(not(wasm_browser))]
+    #[test]
+    fn a_new_invitation_finishes_an_interrupted_acceptance_before_cleanup() {
+        let (_dir, store, phone, request) = interrupted_acceptance();
+        // Move the invitation past its result window, so that cleanup would
+        // remove it.
+        let path = store.dir().join("pairing.json");
+        let mut offers: Offers = disk::read(&path).unwrap();
+        offers
+            .offers
+            .get_mut(&request.token)
+            .unwrap()
+            .invitation
+            .expires_at = Timestamp::now() - jiff::SignedDuration::from_secs(600);
+        disk::write(&path, &offers).unwrap();
+        let ticket = EndpointTicket::new(iroh::EndpointAddr::new(phone)).to_string();
+        let later = Timestamp::now() + jiff::SignedDuration::from_secs(60);
+        create(&store, ticket, "Mac".into(), later).unwrap();
+        assert!(store.allow_list().contains(&phone));
+    }
+
+    #[cfg(not(wasm_browser))]
+    #[test]
+    fn recover_without_invitations_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        recover(&store).unwrap();
+        assert!(!store.dir().join("pairing.json").exists());
     }
 
     #[test]

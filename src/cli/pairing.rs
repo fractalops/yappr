@@ -75,6 +75,11 @@ pub(super) async fn pairing_session(
         pairing::revoke(store.dir(), &invitation.token)?;
         Ok(PairOutcome::Interrupted)
     };
+    let writer = invitation
+        .ticket
+        .parse::<EndpointTicket>()?
+        .endpoint_addr()
+        .id;
     let mut asked = false;
     loop {
         let offer = pairing::get(store.dir(), &invitation.token)?;
@@ -113,9 +118,10 @@ pub(super) async fn pairing_session(
         if let (Some(candidate), false) = (offer.candidate, asked) {
             asked = true;
             eprintln!(
-                "Device: {}\nID: {}",
+                "Device: {}\nID: {}\nCheck code: {}\nCheck that the device shows the same code.",
                 yappr::proto::printable(&candidate.name),
-                candidate.id
+                candidate.id,
+                pairing::check_code(writer, candidate.id, &invitation.token)
             );
             if io::stdin().is_terminal() {
                 eprintln!("Allow this device? [y/N]");
@@ -208,9 +214,18 @@ pub(super) async fn join(
                 }
                 "rejected" => bail!("{}", yappr::proto::printable(&reply.message)),
                 _ => {
-                    // Print the message once, not on each ask.
+                    // Print the message once, not on each ask. The check code
+                    // shows only after this device's own claim.
                     if waiting.as_ref() != Some(&reply.message) {
                         eprintln!("{}", yappr::proto::printable(&reply.message));
+                        eprintln!(
+                            "Check code: {}",
+                            pairing::check_code(
+                                ticket.endpoint_addr().id,
+                                endpoint.id(),
+                                &invitation.token
+                            )
+                        );
                         waiting = Some(reply.message);
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;

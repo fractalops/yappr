@@ -68,8 +68,8 @@ pub(super) async fn pairing_session(
     println!("{text}");
     io::stdout().flush()?;
     print_qr(&text)?;
-    eprintln!("Scan the code with the Yappr app, or on another computer run:");
-    eprintln!("yappr join {text}");
+    eprintln!("Scan the QR code with the Yappr app.");
+    eprintln!("On another computer, pass the YAPPR: code to yappr join.");
     eprintln!("The invitation expires at {expires_at}.");
     let interrupted = || -> Result<PairOutcome> {
         pairing::revoke(store.dir(), &invitation.token)?;
@@ -81,6 +81,7 @@ pub(super) async fn pairing_session(
         .endpoint_addr()
         .id;
     let mut asked = false;
+    let mut input = None;
     loop {
         let offer = pairing::get(store.dir(), &invitation.token)?;
         match offer.status.as_str() {
@@ -118,47 +119,47 @@ pub(super) async fn pairing_session(
         if let (Some(candidate), false) = (offer.candidate, asked) {
             asked = true;
             eprintln!(
-                "Device: {}\nID: {}\nCheck code: {}\nCheck that the device shows the same code.",
+                "\nPair with {}\nCheck code: {}",
                 yappr::proto::printable(&candidate.name),
-                candidate.id,
                 pairing::check_code(writer, candidate.id, &invitation.token)
             );
             if io::stdin().is_terminal() {
-                eprintln!("Allow this device? [y/N]");
-                let answer = tokio::select! {
-                    line = read_stdin_line() => line?,
-                    _ = tokio::signal::ctrl_c() => return interrupted(),
-                };
-                let accept = matches!(answer.trim().to_lowercase().as_str(), "y" | "yes");
-                // "pair --accept" or "pair --reject" in another terminal can
-                // answer first. The next check reports that answer.
-                if let Err(error) = pairing::confirm(store, candidate.id, accept) {
-                    if pairing::get(store.dir(), &invitation.token)?.status == "pending" {
-                        return Err(error);
-                    }
-                }
-                continue;
+                eprintln!("Accept if the codes match [y/N]");
+                let (answer, receiver) = tokio::sync::oneshot::channel();
+                // A terminal read can outlive the invitation. Keep it outside
+                // the runtime so it cannot block process shutdown.
+                std::thread::Builder::new().spawn(move || {
+                    let mut line = String::new();
+                    let result = io::stdin().read_line(&mut line).map(|_| line);
+                    let _ = answer.send(result);
+                })?;
+                input = Some((candidate.id, receiver));
+            } else {
+                eprintln!("Compare the check code with the device.");
+                eprintln!("yappr pair --accept {}", candidate.id);
             }
-            eprintln!(
-                "Confirm this device in another terminal: yappr pair --accept {}",
-                candidate.id
-            );
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(300)) => {},
+            answer = async {
+                let (id, receiver) = input.as_mut().expect("a terminal prompt is open");
+                (*id, receiver.await)
+            }, if input.is_some() => {
+                input = None;
+                let (id, line) = answer;
+                let line = line??;
+                let accept = matches!(line.trim().to_lowercase().as_str(), "y" | "yes");
+                if let Err(error) = pairing::confirm(store, id, accept) {
+                    if Timestamp::now() < expires_at
+                        && pairing::get(store.dir(), &invitation.token)?.status == "pending"
+                    {
+                        return Err(error);
+                    }
+                }
+            },
             _ = tokio::signal::ctrl_c() => return interrupted(),
         }
     }
-}
-
-/// One line from stdin, read on a blocking thread so Ctrl-C still works.
-async fn read_stdin_line() -> Result<String> {
-    tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        anyhow::Ok(line)
-    })
-    .await?
 }
 
 pub(super) async fn join(
@@ -186,7 +187,7 @@ pub(super) async fn join(
             if last_ask <= Timestamp::now() {
                 bail!("the invitation expired. Create a new invitation on the writer");
             }
-            let reply: pairing::PairReply = client
+            let reply = client
                 .exchange(
                     ticket.endpoint_addr().clone(),
                     pairing::ALPN,
@@ -196,14 +197,26 @@ pub(super) async fn join(
                         ticket: None,
                     },
                 )
-                .await
-                .map_err(|e| match e.downcast_ref::<choices::ChoiceError>() {
-                    // The writer refuses unknown devices when no invitation is open.
-                    Some(c) if c.code == "denied" => anyhow::anyhow!(
+                .await;
+            let reply: pairing::PairReply = match reply {
+                Ok(reply) => reply,
+                Err(e)
+                    if e.downcast_ref::<choices::ChoiceError>()
+                        .is_some_and(|e| e.code == "denied") =>
+                {
+                    bail!(
                         "the writer has no open invitation. Create a new invitation on the writer"
-                    ),
-                    _ => e,
-                })?;
+                    );
+                }
+                // The writer can restart after it saves the decision. Wait
+                // for the result even if the old connection fails.
+                Err(e) if waiting.is_some() => {
+                    tracing::debug!(%e, "pairing request failed");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             match reply.status.as_str() {
                 "accepted" => {
                     if let Some(alias) = &alias {

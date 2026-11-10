@@ -680,6 +680,139 @@ fn init_serves_pairs_one_device_and_keeps_serving() {
     init.wait().ok();
 }
 
+#[cfg(unix)]
+#[test]
+fn pair_exits_when_an_open_terminal_prompt_expires() {
+    use std::os::fd::FromRawFd;
+
+    let writer = Machine::new();
+    let device = Machine::new();
+    let _server = Serve::start_with(&writer, &["--timeout", "1s"]);
+    let (mut master, mut terminal) = (-1, -1);
+    // The terminal stays open with no input until the pairing command exits.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut terminal,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let _master = unsafe { std::fs::File::from_raw_fd(master) };
+    let terminal = unsafe { std::fs::File::from_raw_fd(terminal) };
+    let child = writer
+        .command(&["pair", "--timeout", "5s"])
+        .stdin(terminal)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut pairing = Serve {
+        child,
+        ticket: String::new(),
+    };
+    let mut code = String::new();
+    BufReader::new(pairing.child.stdout.take().unwrap())
+        .read_line(&mut code)
+        .unwrap();
+    assert!(code.starts_with("YAPPR:"));
+    let child = device
+        .command(&["join", code.trim(), "--name", "Phone"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _join = Serve {
+        child,
+        ticket: String::new(),
+    };
+    let stderr = pairing.child.stderr.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        BufReader::new(stderr).read_to_string(&mut output).unwrap();
+        let _ = send.send(output);
+    });
+    let output = receive.recv_timeout(Duration::from_secs(12)).unwrap();
+    assert!(
+        output.contains("Accept if the codes match [y/N]"),
+        "{output}"
+    );
+    assert!(
+        output.contains("the pairing invitation expired"),
+        "{output}"
+    );
+    assert!(!pairing.child.wait().unwrap().success());
+}
+
+#[cfg(unix)]
+#[test]
+fn join_reads_the_pairing_result_after_a_writer_restart() {
+    let writer = Machine::new();
+    let device = Machine::new();
+    let id = device.id();
+    let port = free_port().to_string();
+    let child = writer
+        .command(&["start", "--pair", "--port", &port, "--timeout", "45s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = Serve {
+        child,
+        ticket: String::new(),
+    };
+    read_ticket(first.child.stderr.take().unwrap());
+    let mut code = String::new();
+    BufReader::new(first.child.stdout.take().unwrap())
+        .read_line(&mut code)
+        .unwrap();
+    let child = device
+        .command(&["join", code.trim(), "--name", "Phone"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut join = Serve {
+        child,
+        ticket: String::new(),
+    };
+    let stderr = join.child.stderr.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if line.starts_with("Check code: ") {
+                let _ = send.send(());
+            }
+        }
+    });
+    receive.recv_timeout(Duration::from_secs(10)).unwrap();
+    drop(first);
+    writer.run(["pair", "--accept", &id]);
+    let second = Serve::start_with(&writer, &["--port", &port]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(35);
+    loop {
+        if let Some(status) = join.child.try_wait().unwrap() {
+            assert!(status.success(), "{status}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "join did not finish");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut ticket = String::new();
+    join.child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut ticket)
+        .unwrap();
+    assert_eq!(ticket.trim(), second.ticket);
+}
+
 #[test]
 fn status_reports_peers_and_questions_as_json_in_a_pipe() {
     let (writer, device) = pair();

@@ -336,7 +336,10 @@ Codes ignore letter case and contain the writer's ticket, name, token, and deadl
 | `--alias NAME` | Local alias for the joining device | Derived from its name |
 
 The first authenticated device with the random token claims the invitation. The writer must accept it before granting access.
-With terminal input, the writer prompts for acceptance. Otherwise, use another terminal with the same feed directory:
+Compare the check code on the device with the check code on the writer.
+With terminal input, enter `y` if they match. Enter `n` if they differ.
+With input from a pipe, stderr shows the full device ID in the accept command.
+Run the accept or reject command on the writer in another terminal with the same feed directory:
 
 ```sh
 yappr pair --accept DEVICE_ID
@@ -378,10 +381,9 @@ yappr start --pair
 
 Leave that terminal open. If `start` already runs, use `yappr pair` in another terminal instead.
 
-On the receiving computer, print its ID and join with that code:
+On the receiving computer, join with that code:
 
 ```sh
-yappr id
 yappr join YAPPR:... --name laptop --alias computer
 ```
 

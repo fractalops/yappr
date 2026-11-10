@@ -37,7 +37,7 @@ On your computer, start Yappr and leave this terminal open:
 yappr start
 ```
 
-<img src="docs/assets/start.gif" alt="Yappr start shows a pairing code, accepts a device, and keeps the feed available" width="800" />
+<img src="docs/assets/start.gif" alt="Yappr start shows a QR code and asks you to accept a device if the check codes match" width="800" />
 
 The first start shows a QR code and a `YAPPR:` code. They expire after five minutes.
 
@@ -46,10 +46,10 @@ On your phone:
 1. Open [yappr.run](https://yappr.run/) and select **Setup**.
 2. Scan the QR code. You can also import a QR image or paste the `YAPPR:` code.
 3. Set **Your device name** to `phone`, then select **Request pairing**.
-4. Check that your phone and the computer's terminal show the same check code.
+4. Compare the check code on your phone with the check code in the computer's terminal.
 
-If the codes match, enter `y` in that terminal. The computer prints the saved
-alias. The examples below use `phone`. Use the printed alias if it differs.
+If the codes match, enter `y` in that terminal. If they differ, enter `n`.
+The computer prints the saved alias. Use that alias in the examples below.
 
 In a second terminal on the same computer, send your first update:
 

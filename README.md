@@ -27,7 +27,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/fractalops/yappr/r
 
 The installer puts `yappr` in `~/.cargo/bin`. To update, run it again.
 The [releases page](https://github.com/fractalops/yappr/releases) also has the archives for each platform.
-To build from source, use `cargo install --git https://github.com/fractalops/yappr --tag v0.1.6`.
+To build from source, use `cargo install --git https://github.com/fractalops/yappr --tag v0.1.7`.
 
 ## Connect your phone
 

@@ -46,9 +46,9 @@ On your phone:
 1. Open [yappr.run](https://yappr.run/) and select **Setup**.
 2. Scan the QR code. You can also import a QR image or paste the `YAPPR:` code.
 3. Set **Your device name** to `phone`, then select **Request pairing**.
-4. Compare the device ID on your phone with the ID in the computer's terminal.
+4. Check that your phone and the computer's terminal show the same check code.
 
-If the IDs match, enter `y` in that terminal. The computer prints the saved
+If the codes match, enter `y` in that terminal. The computer prints the saved
 alias. The examples below use `phone`. Use the printed alias if it differs.
 
 In a second terminal on the same computer, send your first update:

@@ -306,20 +306,31 @@ mod writer {
         hello: impl Fn() -> Hello,
         progress: watch::Sender<Stored>,
     ) {
-        let mut backoff = MIN_BACKOFF;
-        loop {
-            let started = tokio::time::Instant::now();
-            if let Err(e) = deliver(&endpoint, &feed, addr.clone(), &hello(), None, &progress).await
-            {
-                tracing::debug!("{e:#}");
+        let notifications = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let saved = progress.borrow().clone();
+                crate::push::notify(feed.store(), addr.id, &saved).await;
             }
-            // A delivery that ran for some time was not a failed connection.
-            if started.elapsed() > Duration::from_secs(60) {
-                backoff = MIN_BACKOFF;
+        };
+        let delivery = async {
+            let mut backoff = MIN_BACKOFF;
+            loop {
+                let started = tokio::time::Instant::now();
+                if let Err(e) =
+                    deliver(&endpoint, &feed, addr.clone(), &hello(), None, &progress).await
+                {
+                    tracing::debug!("{e:#}");
+                }
+                // A delivery that ran for some time was not a failed connection.
+                if started.elapsed() > Duration::from_secs(60) {
+                    backoff = MIN_BACKOFF;
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(MAX_BACKOFF);
-        }
+        };
+        tokio::join!(delivery, notifications);
     }
 
     /// Deliver the feed to each allowed device that receives it, for as long

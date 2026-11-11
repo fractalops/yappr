@@ -129,6 +129,8 @@ pub(super) async fn deliver_now(common: &CommonArgs, store: &Store, through: u64
         let (endpoint, feed, hello) = (endpoint.clone(), feed.clone(), hello.clone());
         tasks.spawn(async move {
             let progress = tokio::sync::watch::channel(Stored::default()).0;
+            let started = tokio::time::Instant::now();
+            let device = addr.id;
             let delivered = timeout(
                 DELIVERY_TIMEOUT,
                 deliver::deliver(&endpoint, &feed, addr, &hello, Some(through), &progress),
@@ -140,6 +142,10 @@ pub(super) async fn deliver_now(common: &CommonArgs, store: &Store, through: u64
                     DELIVERY_TIMEOUT.as_secs()
                 ))
             });
+            if delivered.is_err() {
+                let saved = progress.borrow().clone();
+                yappr::push::notify_after_failure(feed.store(), device, &saved, started).await;
+            }
             (alias, delivered)
         });
     }

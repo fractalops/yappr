@@ -199,8 +199,10 @@ pub(super) fn key(common: &CommonArgs, args: KeyArgs) -> Result<()> {
 
 pub(super) fn deny(common: &CommonArgs, target: String) -> Result<()> {
     let id = peers::resolve(&common.dir()?, &target)?.id;
-    let list = common.store()?.allow_list();
-    if list.deny(&id)? {
+    let store = common.store()?;
+    let denied = store.allow_list().deny(&id)?;
+    yappr::push::clear(&store, id)?;
+    if denied {
         eprintln!("denied {id}. A running start closes its feed within 5 seconds");
     } else {
         eprintln!("{id} was not allowed");

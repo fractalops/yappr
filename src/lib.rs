@@ -12,6 +12,7 @@ pub mod net;
 pub mod open;
 pub mod pairing;
 pub mod proto;
+pub mod push;
 
 #[cfg(not(wasm_browser))]
 pub mod access;

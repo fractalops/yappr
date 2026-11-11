@@ -99,7 +99,10 @@ pub(super) async fn pairing_session(
                         let ticket: EndpointTicket = ticket.parse()?;
                         let known = common.net(None)?.relays.relay_urls()?;
                         let addr = net::known_relays_only(ticket.endpoint_addr(), &known);
-                        peers::set_receiver(store.dir(), &alias, &addr.into())?
+                        peers::set_receiver(store.dir(), &alias, &addr.into())?;
+                        if let Some(push) = candidate.push {
+                            yappr::push::set(store, candidate.id, Some(push))?;
+                        }
                     }
                     None => peers::set(store.dir(), &alias, &candidate.id.to_string())?,
                 }
@@ -195,6 +198,7 @@ pub(super) async fn join(
                         token: invitation.token.clone(),
                         name: name.clone(),
                         ticket: None,
+                        push: None,
                     },
                 )
                 .await;

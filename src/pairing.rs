@@ -208,6 +208,8 @@ pub struct Candidate {
     /// The address where the device receives this feed's entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<crate::push::Subscription>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Offer {
@@ -229,6 +231,8 @@ pub struct Join {
     /// writer then delivers its entries to that address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<crate::push::Subscription>,
 }
 
 /// The longest ticket in a [`Join`], in bytes.
@@ -342,6 +346,13 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
             bail!("the device address belongs to another device");
         }
     }
+    if let Some(push) = &request.push {
+        anyhow::ensure!(
+            request.ticket.is_some(),
+            "A push subscription needs a device address."
+        );
+        push.validate()?;
+    }
     let _lock = disk::lock(store.dir(), "pairing.lock")?;
     let path = store.dir().join("pairing.json");
     let mut offers: Offers = disk::read(&path)?;
@@ -377,6 +388,7 @@ pub fn join(store: &Store, remote: EndpointId, request: Join) -> Result<PairRepl
                 id: remote,
                 name: request.name,
                 ticket: request.ticket,
+                push: request.push,
             });
             true
         }
@@ -532,6 +544,7 @@ mod tests {
             token: invitation.token.clone(),
             name: "Phone".into(),
             ticket: Some(EndpointTicket::new(iroh::EndpointAddr::new(id)).to_string()),
+            push: None,
         };
         let other = iroh::SecretKey::generate().public();
         assert!(join(&store, phone, join_with(other)).is_err());
@@ -576,6 +589,7 @@ mod tests {
             token: invitation.token.clone(),
             name: "Phone".into(),
             ticket: None,
+            push: None,
         };
         join(&store, phone, request.clone()).unwrap();
         let path = store.dir().join("pairing.json");

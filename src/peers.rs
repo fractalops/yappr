@@ -14,6 +14,8 @@ pub struct Peer {
     /// This machine delivers its entries to the device at `ticket`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub receives: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) push: Option<crate::push::Registration>,
 }
 
 pub fn validate_alias(alias: &str) -> Result<()> {
@@ -77,6 +79,7 @@ pub fn set(dir: &Path, alias: &str, target: &str) -> Result<()> {
             id: ticket.endpoint_addr().id,
             ticket: Some(ticket.to_string()),
             receives: false,
+            push: None,
         }
     } else {
         Peer {
@@ -85,6 +88,7 @@ pub fn set(dir: &Path, alias: &str, target: &str) -> Result<()> {
                 .context("use a full device ID or feed ticket")?,
             ticket: None,
             receives: false,
+            push: None,
         }
     };
     let _lock = disk::lock(dir, "peers.lock")?;
@@ -97,11 +101,13 @@ pub fn set(dir: &Path, alias: &str, target: &str) -> Result<()> {
     let old = peers.get(alias);
     let ticket = peer.ticket.or_else(|| old.and_then(|p| p.ticket.clone()));
     let receives = old.is_some_and(|p| p.receives);
+    let push = old.and_then(|p| p.push.clone());
     peers.insert(
         alias.into(),
         Peer {
             ticket,
             receives,
+            push,
             ..peer
         },
     );

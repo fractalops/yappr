@@ -683,13 +683,23 @@ fn init_serves_pairs_one_device_and_keeps_serving() {
 #[cfg(unix)]
 #[test]
 fn pair_exits_when_an_open_terminal_prompt_expires() {
-    use std::os::fd::FromRawFd;
+    check_terminal_pair(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn pair_accepts_from_another_terminal_after_input_ends() {
+    check_terminal_pair(true);
+}
+
+#[cfg(unix)]
+fn check_terminal_pair(end_input: bool) {
+    use std::{io::Write, os::fd::FromRawFd};
 
     let writer = Machine::new();
     let device = Machine::new();
     let _server = Serve::start_with(&writer, &["--timeout", "1s"]);
     let (mut master, mut terminal) = (-1, -1);
-    // The terminal stays open with no input until the pairing command exits.
     assert_eq!(
         unsafe {
             libc::openpty(
@@ -702,10 +712,11 @@ fn pair_exits_when_an_open_terminal_prompt_expires() {
         },
         0
     );
-    let _master = unsafe { std::fs::File::from_raw_fd(master) };
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
     let terminal = unsafe { std::fs::File::from_raw_fd(terminal) };
+    let timeout = if end_input { "15s" } else { "5s" };
     let child = writer
-        .command(&["pair", "--timeout", "5s"])
+        .command(&["pair", "--timeout", timeout])
         .stdin(terminal)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -726,27 +737,52 @@ fn pair_exits_when_an_open_terminal_prompt_expires() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let _join = Serve {
+    let mut join = Serve {
         child,
         ticket: String::new(),
     };
     let stderr = pairing.child.stderr.take().unwrap();
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut output = String::new();
-        BufReader::new(stderr).read_to_string(&mut output).unwrap();
-        let _ = send.send(output);
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
     });
-    let output = receive.recv_timeout(Duration::from_secs(12)).unwrap();
-    assert!(
-        output.contains("Accept if the codes match [y/N]"),
-        "{output}"
-    );
-    assert!(
-        output.contains("the pairing invitation expired"),
-        "{output}"
-    );
-    assert!(!pairing.child.wait().unwrap().success());
+    let wait_for = |text: &str| loop {
+        let line = receive.recv_timeout(Duration::from_secs(12)).unwrap();
+        if line.contains(text) {
+            break;
+        }
+    };
+    wait_for("Accept if the codes match [y/N]");
+    if end_input {
+        master.write_all(b"\x04").unwrap();
+        wait_for("yappr pair --accept ");
+        writer.run(["pair", "--accept", &device.id()]);
+        assert!(pairing.child.wait().unwrap().success());
+        assert!(join.child.wait().unwrap().success());
+    } else {
+        wait_for("the pairing invitation expired");
+        assert!(!pairing.child.wait().unwrap().success());
+    }
+}
+
+#[test]
+fn updating_an_alias_preserves_unknown_peer_fields() {
+    let writer = Machine::new();
+    let device = Machine::new();
+    let id = device.id();
+    writer.run(["alias", "set", "phone", &id]);
+    let path = writer.dir.path().join("peers.json");
+    let mut peers: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    peers["phone"]["future"] = serde_json::json!({"flag": true});
+    std::fs::write(&path, serde_json::to_vec(&peers).unwrap()).unwrap();
+    writer.run(["alias", "set", "phone", &id]);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["phone"]["future"], peers["phone"]["future"]);
 }
 
 #[cfg(unix)]
@@ -824,6 +860,27 @@ fn status_reports_peers_and_questions_as_json_in_a_pipe() {
     assert_eq!(status["peers"][0]["reads"], true);
     assert_eq!(status["questions"]["pending"], 1);
     assert_eq!(status["outbox"]["queued"], 0);
+}
+
+#[test]
+fn status_reports_writer_details_only_while_the_writer_runs() {
+    let writer = Machine::new();
+    let status = || {
+        serde_json::from_str::<serde_json::Value>(&writer.run(["status"])).unwrap()["writer"]
+            .clone()
+    };
+    let server = Serve::start(&writer);
+    let running = status();
+    assert_eq!(running["running"], true);
+    assert_eq!(running["pid"], server.child.id());
+    assert_eq!(running["version"], env!("CARGO_PKG_VERSION"));
+    let binary = std::path::Path::new(running["binary"].as_str().unwrap());
+    assert!(binary.is_absolute());
+    assert_eq!(binary.file_name(), std::path::Path::new(bin()).file_name());
+    drop(server);
+    assert_eq!(status(), serde_json::json!({"running": false}));
+    let _older_writer = yappr::disk::lock(writer.dir.path(), "serve.lock").unwrap();
+    assert_eq!(status(), serde_json::json!({"running": true}));
 }
 
 #[test]
@@ -1341,6 +1398,95 @@ fn ask_needs_a_device_a_question_and_two_choices() {
 }
 
 #[test]
+fn config_shows_and_saves_feed_settings() {
+    let writer = Machine::new();
+    let json = || {
+        serde_json::from_str::<serde_json::Value>(&writer.run(["config", "--output", "json"]))
+            .unwrap()
+    };
+    assert_eq!(
+        json(),
+        serde_json::json!({
+            "name": null,
+            "relays": {"disabled": false, "urls": []},
+            "mdns": true,
+        })
+    );
+    assert!(writer.run(["config"]).contains("(computer name)"));
+    assert!(!writer.dir.path().join("config.json").exists());
+
+    writer.run([
+        "config",
+        "--relay",
+        "https://relay.example.com",
+        "--relay",
+        "https://relay2.example.com",
+        "--no-mdns",
+        "--name",
+        "Work Mac",
+    ]);
+    let custom = serde_json::json!({
+        "name": "Work Mac",
+        "relays": {"disabled": false, "urls": ["https://relay.example.com", "https://relay2.example.com"]},
+        "mdns": false,
+    });
+    assert_eq!(json(), custom);
+    assert_eq!(writer.run(["config"]), "Writer name: Work Mac\nRelays: https://relay.example.com, https://relay2.example.com\nLocal discovery: Off\n");
+
+    writer.fail(["config", "--relay", "file:///tmp", "--name", "Other"]);
+    writer.fail(["--no-relay", "config", "--default-relays"]);
+    writer.fail(["--no-mdns", "config", "--mdns"]);
+    assert_eq!(json(), custom);
+
+    writer.run(["--no-relay", "--no-mdns", "id"]);
+    assert_eq!(json(), custom);
+    writer.run(["config", "--no-relay"]);
+    assert_eq!(
+        json()["relays"],
+        serde_json::json!({"disabled": true, "urls": []})
+    );
+    assert_eq!(json()["name"], "Work Mac");
+    writer.run(["config", "--default-relays"]);
+    assert_eq!(
+        json()["relays"],
+        serde_json::json!({"disabled": false, "urls": []})
+    );
+    assert_eq!(json()["mdns"], false);
+    writer.run(["config", "--mdns"]);
+    assert_eq!(json()["mdns"], true);
+    writer.run(["config", "--name", ""]);
+    assert!(json()["name"].is_null());
+    assert!(writer.run(["config"]).contains("(computer name)"));
+
+    for command in ["network", "push"] {
+        let (_, stderr) = writer.fail([command]);
+        assert!(stderr.contains("unrecognized subcommand"), "{stderr}");
+    }
+}
+
+#[test]
+fn unlock_is_recorded_only_when_requested() {
+    let (writer, device) = pair();
+    writer.run([
+        "approve",
+        &device.id(),
+        "Open the app?",
+        "--unlock",
+        "--no-wait",
+    ]);
+    writer.run(["approve", &device.id(), "Answer here?", "--no-wait"]);
+    let log = writer.run(["read", "--output", "json"]);
+    let questions: Vec<_> = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter_map(|entry| entry.pointer("/choices/question").cloned())
+        .collect();
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[0]["unlock"], true);
+    assert!(questions[1].get("unlock").is_none());
+}
+
+#[test]
 fn questions_report_cancellation_and_expiry() {
     let (writer, device) = pair();
     let responder = device.id();
@@ -1451,36 +1597,6 @@ fn health_reports_the_selected_path_and_denied_access() {
     let (exit, output, _) = device.exit(["health", "laptop", "--output", "text"], b"");
     assert_eq!((exit, output.as_str()), (3, "laptop: denied\n"));
 }
-#[test]
-fn relay_settings_persist_and_validate_without_replacing_good_settings() {
-    let machine = Machine::new();
-    machine.run([
-        "network",
-        "set",
-        "--relay",
-        "https://relay.example.com",
-        "--relay",
-        "http://127.0.0.1:3340",
-    ]);
-    let custom: serde_json::Value =
-        serde_json::from_str(&machine.run(["network", "show"])).unwrap();
-    assert_eq!(custom["urls"].as_array().unwrap().len(), 2);
-    machine.fail(["network", "set", "--relay", "ftp://relay.example.com"]);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&machine.run(["network", "show"])).unwrap(),
-        custom
-    );
-    machine.run(["network", "set", "--no-relay"]);
-    assert!(machine
-        .run(["network", "show"])
-        .contains("\"disabled\":true"));
-    machine.run(["network", "set", "--defaults"]);
-    assert_eq!(
-        machine.run(["network", "show"]).trim(),
-        "{\"disabled\":false,\"urls\":[]}"
-    );
-}
-
 #[test]
 fn one_denied_writer_does_not_discard_another_writers_entries() {
     let good = Machine::new();

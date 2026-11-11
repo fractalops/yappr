@@ -60,6 +60,11 @@ echo "Backup complete" | yappr post --source backup
 The command prints an entry number. On your phone, select **Feed** to see
 **Backup complete**.
 
+To receive notifications when Yappr is closed, open **Setup** in the app.
+In **Advanced settings**, select **Notify me when this page is closed**.
+Allow browser notifications. Yappr sends notifications for questions, warnings, and alerts.
+Run `yappr config --name "Work Mac"` to set the writer name for new entries and notifications.
+
 To use a CLI on another computer, see [Connect another CLI](docs/reference.md#connect-another-cli).
 
 ## Updates, approvals, and choices

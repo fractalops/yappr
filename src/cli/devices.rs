@@ -199,8 +199,10 @@ pub(super) fn key(common: &CommonArgs, args: KeyArgs) -> Result<()> {
 
 pub(super) fn deny(common: &CommonArgs, target: String) -> Result<()> {
     let id = peers::resolve(&common.dir()?, &target)?.id;
-    let list = common.store()?.allow_list();
-    if list.deny(&id)? {
+    let store = common.store()?;
+    let denied = store.allow_list().deny(&id)?;
+    yappr::push::clear(&store, id)?;
+    if denied {
         eprintln!("denied {id}. A running start closes its feed within 5 seconds");
     } else {
         eprintln!("{id} was not allowed");
@@ -211,6 +213,7 @@ pub(super) fn deny(common: &CommonArgs, target: String) -> Result<()> {
 /// This machine at a glance: identity, feed, peers, questions, and outbox.
 pub(super) fn status(common: &CommonArgs, text: bool) -> Result<()> {
     let store = common.store()?;
+    let writer = super::writer::writer_status(store.dir())?;
     let id = common.secret()?.public();
     let allowed = store.allow_list().load()?;
     let mut peers = Vec::new();
@@ -244,6 +247,7 @@ pub(super) fn status(common: &CommonArgs, text: bool) -> Result<()> {
         let json = serde_json::json!({
             "endpoint": id,
             "feed": {"dir": store.dir(), "entries": store.last_id()?},
+            "writer": writer,
             "peers": peers,
             "questions": questions,
             "outbox": {"queued": queued},
@@ -257,6 +261,16 @@ pub(super) fn status(common: &CommonArgs, text: bool) -> Result<()> {
         store.dir().display(),
         store.last_id()?
     );
+    if let Some(info) = writer.info {
+        println!(
+            "writer     running, PID {}, version {} ({})",
+            info.pid, info.version, info.binary
+        );
+    } else if writer.running {
+        println!("writer     running. This writer did not report its details.");
+    } else {
+        println!("writer     stopped");
+    }
     println!();
     if peers.is_empty() {
         println!("peers      none. Run \"yappr start\" to pair a device.");

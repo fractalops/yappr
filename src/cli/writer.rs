@@ -129,6 +129,8 @@ pub(super) async fn deliver_now(common: &CommonArgs, store: &Store, through: u64
         let (endpoint, feed, hello) = (endpoint.clone(), feed.clone(), hello.clone());
         tasks.spawn(async move {
             let progress = tokio::sync::watch::channel(Stored::default()).0;
+            let started = tokio::time::Instant::now();
+            let device = addr.id;
             let delivered = timeout(
                 DELIVERY_TIMEOUT,
                 deliver::deliver(&endpoint, &feed, addr, &hello, Some(through), &progress),
@@ -140,6 +142,10 @@ pub(super) async fn deliver_now(common: &CommonArgs, store: &Store, through: u64
                     DELIVERY_TIMEOUT.as_secs()
                 ))
             });
+            if delivered.is_err() {
+                let saved = progress.borrow().clone();
+                yappr::push::notify_after_failure(feed.store(), device, &saved, started).await;
+            }
             (alias, delivered)
         });
     }
@@ -223,6 +229,39 @@ fn read_body(input: impl Read) -> Result<String> {
 /// The lock that a running writer holds. Other commands then leave delivery
 /// to the writer.
 const SERVE_LOCK: &str = "serve.lock";
+const WRITER_INFO: &str = "writer.json";
+const WRITER_INFO_LOCK: &str = "writer-info.lock";
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(super) struct WriterInfo {
+    pub pid: u32,
+    pub version: String,
+    pub binary: String,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct WriterStatus {
+    pub running: bool,
+    #[serde(flatten)]
+    pub info: Option<WriterInfo>,
+}
+
+pub(super) fn writer_status(dir: &std::path::Path) -> Result<WriterStatus> {
+    let running = disk::try_lock(dir, SERVE_LOCK)?.is_none();
+    // Older writers hold only the serving lock. The second lock proves
+    // that the writer recorded these details for its current run.
+    let info = if running && disk::try_lock(dir, WRITER_INFO_LOCK)?.is_none() {
+        disk::read(&dir.join(WRITER_INFO))?
+    } else {
+        None
+    };
+    Ok(WriterStatus { running, info })
+}
+
+struct WriterLocks {
+    _info: std::fs::File,
+    _serve: std::fs::File,
+}
 
 /// Start the server, save its ticket, and print how to read it. With
 /// `pair_hint`, a feed that no device can read gets a hint to run pair. The
@@ -231,7 +270,7 @@ async fn start_serving(
     common: &CommonArgs,
     port: Option<u16>,
     pair_hint: bool,
-) -> Result<(Store, Server, EndpointTicket, std::fs::File)> {
+) -> Result<(Store, Server, EndpointTicket, WriterLocks)> {
     let store = common.store()?;
     let lock = disk::try_lock(store.dir(), SERVE_LOCK)?
         .with_context(|| format!("yappr start already runs for {}", store.dir().display()))?;
@@ -254,6 +293,18 @@ async fn start_serving(
         &store.dir().join("endpoint.json"),
         &Some(EndpointTicket::new(addr.clone()).to_string()),
     )?;
+    disk::write(
+        &store.dir().join(WRITER_INFO),
+        &WriterInfo {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            binary: std::env::current_exe()?.to_string_lossy().into_owned(),
+        },
+    )?;
+    let writer_locks = WriterLocks {
+        _info: disk::lock(store.dir(), WRITER_INFO_LOCK)?,
+        _serve: lock,
+    };
     let short = short_ticket(&addr);
     let ticket = EndpointTicket::new(addr);
     let allowed = store.allow_list().load()?.len();
@@ -272,7 +323,7 @@ async fn start_serving(
     }
     eprintln!("To read the feed on another computer, use:\nyappr read {ticket}");
     eprintln!("or, with the endpoint id only:\nyappr read {short}");
-    Ok((store, server, ticket, lock))
+    Ok((store, server, ticket, writer_locks))
 }
 
 /// When `start` pairs a device.
@@ -296,7 +347,7 @@ pub(super) async fn start(common: &CommonArgs, args: StartArgs, pairing: Pairing
         start_serving(common, args.port, pairing == Pairing::Never).await?;
     let first = store.allow_list().load()?.is_empty();
     if pairing == Pairing::Always || (pairing == Pairing::First && first) {
-        let name = args.name.unwrap_or_else(hostname);
+        let name = common.pairing_name(args.name)?;
         let outcome = pairing_session(
             common,
             &store,

@@ -1,6 +1,7 @@
 //! CLI dispatch and process error handling.
 
 mod args;
+mod config;
 mod context;
 mod devices;
 mod feed;
@@ -12,7 +13,7 @@ mod writer;
 
 use std::{io, time::Duration};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::EndpointAddr;
 use yappr::{
@@ -20,10 +21,10 @@ use yappr::{
     client::{Denied, Unreachable},
     entry::{self, Invalid},
     ingest::Rejected,
-    net, peers, EndpointTicket,
+    peers, EndpointTicket,
 };
 
-use args::{AliasCommand, Args, Commands, Format, NetworkCommand, ReadArgs};
+use args::{AliasCommand, Args, Commands, Format, ReadArgs};
 use questions::QuestionOutcome;
 use writer::Undelivered;
 
@@ -116,10 +117,16 @@ pub(super) async fn run() -> Result<()> {
                 )
                 .into());
             }
-            questions::ask(common, args.question, args.choices, false).await
+            questions::ask(common, args.question, args.choices, None).await
         }
         Commands::Approve(args) => {
-            questions::ask(common, args.question, choices::approval_options(), true).await
+            questions::ask(
+                common,
+                args.question,
+                choices::approval_options(),
+                Some(args.unlock),
+            )
+            .await
         }
         Commands::Questions { output } => {
             let text = Format::is_text(output);
@@ -152,6 +159,12 @@ pub(super) async fn run() -> Result<()> {
             questions::answer(common, ticket, id, value).await
         }
         Commands::Retry => writer::retry(common).await,
+        Commands::Config {
+            name,
+            default_relays,
+            mdns,
+            output,
+        } => config::run(common, name, default_relays, mdns, output),
         Commands::Pair(args) => pairing::pair(common, args).await,
         Commands::Join {
             invitation,
@@ -161,28 +174,6 @@ pub(super) async fn run() -> Result<()> {
         Commands::Alias { command } => match command {
             AliasCommand::Set { name, target } => peers::set(&common.dir()?, &name, &target),
             AliasCommand::Remove { name } => peers::remove(&common.dir()?, &name),
-        },
-        Commands::Network { command } => match command {
-            NetworkCommand::Show => {
-                println!(
-                    "{}",
-                    serde_json::to_string(&net::RelaySettings::load(&common.dir()?)?)?
-                );
-                Ok(())
-            }
-            NetworkCommand::Set { defaults } => {
-                if defaults && (common.no_relay || !common.relays.is_empty()) {
-                    bail!("--defaults cannot be combined with --relay or --no-relay");
-                }
-                if common.relays.is_empty() && !common.no_relay && !defaults {
-                    bail!("use --relay URL, --no-relay, or --defaults");
-                }
-                net::RelaySettings {
-                    urls: common.relays.clone(),
-                    disabled: common.no_relay,
-                }
-                .save(&common.dir()?)
-            }
         },
         Commands::Health { target, output } => {
             devices::probe(common, &target, Format::is_text(output)).await

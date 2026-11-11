@@ -12,9 +12,12 @@ pub mod net;
 pub mod open;
 pub mod pairing;
 pub mod proto;
+pub mod push;
 
 #[cfg(not(wasm_browser))]
 pub mod access;
+#[cfg(not(wasm_browser))]
+pub mod config;
 #[cfg(not(wasm_browser))]
 pub mod cursor;
 #[cfg(not(wasm_browser))]
@@ -33,6 +36,8 @@ pub mod render;
 pub mod server;
 #[cfg(not(wasm_browser))]
 pub mod store;
+#[cfg(not(wasm_browser))]
+pub mod writer_name;
 
 /// The feed protocol identifier.
 ///

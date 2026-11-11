@@ -30,6 +30,8 @@ pub struct Question {
     pub responder: EndpointId,
     pub expires_at: Option<Timestamp>,
     pub approval: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlock: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -492,6 +494,7 @@ pub fn new_question(
         responder,
         expires_at,
         approval,
+        unlock: false,
     }
 }
 

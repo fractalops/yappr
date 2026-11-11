@@ -63,7 +63,7 @@ pub(super) async fn ask(
     common: &CommonArgs,
     mut args: QuestionArgs,
     options: Vec<Choice>,
-    approval: bool,
+    approval_unlock: Option<bool>,
 ) -> Result<()> {
     let (to, title) = args.target()?;
     let store = common.store()?;
@@ -72,15 +72,16 @@ pub(super) async fn ask(
         bail!("allow the responder first: yappr allow {to}");
     }
     let expires_at = Timestamp::now().checked_add(jiff::SignedDuration::try_from(args.timeout)?)?;
-    let question = choices::new_question(
+    let mut question = choices::new_question(
         title,
         args.body,
         args.source.unwrap_or_else(hostname),
         options,
         responder,
         Some(expires_at),
-        approval,
+        approval_unlock.is_some(),
     );
+    question.unlock = approval_unlock.unwrap_or(false);
     let question: Question = choices::create_with(&store, question, args.details.into_details())?;
     if args.no_wait {
         println!("{}", question.id);

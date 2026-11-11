@@ -1,6 +1,6 @@
 [package]
 name = "yappr"
-version = "0.1.7"
+version = "0.1.8-rc.4"
 edition = "2021"
 keywords = ["feed", "cli", "p2p", "iroh", "ndjson"]
 categories = ["command-line-utilities", "network-programming"]
@@ -27,11 +27,16 @@ tracing = "0.1.44"
 
 # The command line and the writer. A browser build of the library leaves them out.
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+base64ct = { version = "1.8.3", features = ["alloc"] }
 dirs = "7.0.0"
+ece-native = "0.5.0"
 gethostname = "1.1.0"
 iroh-mdns-address-lookup = "0.6.1"
 libc = "0.2"
 qrcode = { version = "0.14.1", default-features = false }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+ring = "0.17.14"
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 terminal_size = "0.4.4"
 tokio = { version = "1.54.1", features = ["full"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

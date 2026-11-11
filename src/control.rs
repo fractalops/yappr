@@ -22,8 +22,15 @@ const MAX_CONNECTIONS: usize = 64;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    Submit { submission: Submission },
-    Status { question_id: String },
+    Submit {
+        submission: Submission,
+    },
+    Status {
+        question_id: String,
+    },
+    SetPush {
+        subscription: Option<crate::push::Subscription>,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -31,6 +38,7 @@ pub enum Reply {
     Accepted { decision: Decision },
     State { state: Box<QuestionState> },
     Rejected { error: ChoiceError },
+    PushSaved,
 }
 
 /// The writer side: answers choice and pairing requests.
@@ -178,13 +186,16 @@ mod writer {
                 });
             proto::write_frame(&mut send, &reply, MAX_CONTROL).await?;
         } else {
-            let req: Request = proto::read_frame(&mut recv, MAX_CONTROL)
+            let req: serde_json::Value = proto::read_frame(&mut recv, MAX_CONTROL)
                 .await?
                 .context("no choice request")?;
-            let result = tokio::task::spawn_blocking(move || match req {
-                Request::Submit { submission } => choices::decide(&store, remote, submission)
+            let result = tokio::task::spawn_blocking(move || match serde_json::from_value(req) {
+                Ok(Request::Submit { submission }) => choices::decide(&store, remote, submission)
                     .map(|decision| Reply::Accepted { decision }),
-                Request::Status { question_id } => {
+                Ok(Request::SetPush { subscription }) => {
+                    crate::push::set(&store, remote, subscription).map(|()| Reply::PushSaved)
+                }
+                Ok(Request::Status { question_id }) => {
                     if !store.allow_list().contains(&remote) {
                         return Err(
                             ChoiceError::new("denied", "this device cannot read the feed").into(),
@@ -194,6 +205,11 @@ mod writer {
                         state: Box::new(state),
                     })
                 }
+                Err(_) => Err(ChoiceError::new(
+                    "unsupported",
+                    "The writer cannot read this request.",
+                )
+                .into()),
             })
             .await?;
             let reply = result.unwrap_or_else(|error| Reply::Rejected {
@@ -378,6 +394,25 @@ impl ControlClient {
             )
             .into()),
             _ => anyhow::bail!("the writer sent an unexpected response"),
+        }
+    }
+
+    pub async fn set_push(
+        &self,
+        addr: EndpointAddr,
+        subscription: Option<crate::push::Subscription>,
+    ) -> Result<()> {
+        match self
+            .exchange(addr, ALPN, &Request::SetPush { subscription })
+            .await?
+        {
+            Reply::PushSaved => Ok(()),
+            Reply::Rejected { error } => Err(ChoiceError::new(
+                &proto::printable(&error.code),
+                &proto::printable(&error.message),
+            )
+            .into()),
+            _ => anyhow::bail!("The writer sent an unexpected response."),
         }
     }
 }

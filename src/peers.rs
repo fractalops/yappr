@@ -14,6 +14,10 @@ pub struct Peer {
     /// This machine delivers its entries to the device at `ticket`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub receives: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) push: Option<crate::push::Registration>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
 pub fn validate_alias(alias: &str) -> Result<()> {
@@ -72,39 +76,37 @@ pub fn list(dir: &Path) -> Result<BTreeMap<String, Peer>> {
 /// An alias never grants access or silently changes its target identity.
 pub fn set(dir: &Path, alias: &str, target: &str) -> Result<()> {
     validate_alias(alias)?;
-    let peer = if let Ok(ticket) = target.parse::<EndpointTicket>() {
-        Peer {
-            id: ticket.endpoint_addr().id,
-            ticket: Some(ticket.to_string()),
-            receives: false,
-        }
+    let (id, ticket) = if let Ok(ticket) = target.parse::<EndpointTicket>() {
+        (ticket.endpoint_addr().id, Some(ticket.to_string()))
     } else {
-        Peer {
-            id: target
+        (
+            target
                 .parse()
                 .context("use a full device ID or feed ticket")?,
-            ticket: None,
-            receives: false,
-        }
+            None,
+        )
     };
     let _lock = disk::lock(dir, "peers.lock")?;
     let mut peers = list(dir)?;
-    if let Some(old) = peers.get(alias) {
-        if old.id != peer.id {
+    if let Some(peer) = peers.get_mut(alias) {
+        if peer.id != id {
             bail!("alias {alias:?} belongs to another device. Remove the alias before assigning a different device");
         }
+        if ticket.is_some() {
+            peer.ticket = ticket;
+        }
+    } else {
+        peers.insert(
+            alias.into(),
+            Peer {
+                id,
+                ticket,
+                receives: false,
+                push: None,
+                extra: BTreeMap::new(),
+            },
+        );
     }
-    let old = peers.get(alias);
-    let ticket = peer.ticket.or_else(|| old.and_then(|p| p.ticket.clone()));
-    let receives = old.is_some_and(|p| p.receives);
-    peers.insert(
-        alias.into(),
-        Peer {
-            ticket,
-            receives,
-            ..peer
-        },
-    );
     disk::write(&dir.join("peers.json"), &peers)
 }
 

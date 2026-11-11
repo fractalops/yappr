@@ -57,6 +57,10 @@ impl Store {
         &self.dir
     }
 
+    pub(crate) fn writer_id(&self) -> Option<iroh::EndpointId> {
+        self.signer.as_ref().map(iroh::SecretKey::public)
+    }
+
     /// Give the draft the next id and the current time, then append it.
     pub fn append(&self, draft: Draft) -> Result<Entry> {
         draft.validate()?;
@@ -126,6 +130,8 @@ impl Store {
             extra: draft.extra,
         };
         if let Some(secret) = &self.signer {
+            let sender = crate::writer_name::sender(&self.dir, &entry.source)?;
+            entry.extra.insert("sender".into(), sender.into());
             let log = match &first {
                 Some(first) => {
                     let log = first.time.to_string();

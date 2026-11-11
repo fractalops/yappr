@@ -13,7 +13,6 @@ use yappr::{
 
 use super::{
     args::{CommonArgs, PairArgs},
-    context::hostname,
     qr::print_qr,
 };
 
@@ -34,7 +33,7 @@ pub(super) async fn pair(common: &CommonArgs, args: PairArgs) -> Result<()> {
     }
     let ticket: Option<String> = disk::read(&store.dir().join("endpoint.json"))?;
     let ticket = ticket.context("run \"yappr start\" before you create an invitation")?;
-    let name = args.name.unwrap_or_else(hostname);
+    let name = common.pairing_name(args.name)?;
     match pairing_session(common, &store, ticket, name, args.expires, args.alias).await? {
         PairOutcome::Expired => bail!("the pairing invitation expired"),
         _ => Ok(()),
@@ -99,7 +98,10 @@ pub(super) async fn pairing_session(
                         let ticket: EndpointTicket = ticket.parse()?;
                         let known = common.net(None)?.relays.relay_urls()?;
                         let addr = net::known_relays_only(ticket.endpoint_addr(), &known);
-                        peers::set_receiver(store.dir(), &alias, &addr.into())?
+                        peers::set_receiver(store.dir(), &alias, &addr.into())?;
+                        if let Some(push) = candidate.push {
+                            yappr::push::set(store, candidate.id, Some(push))?;
+                        }
                     }
                     None => peers::set(store.dir(), &alias, &candidate.id.to_string())?,
                 }
@@ -135,8 +137,7 @@ pub(super) async fn pairing_session(
                 })?;
                 input = Some((candidate.id, receiver));
             } else {
-                eprintln!("Compare the check code with the device.");
-                eprintln!("yappr pair --accept {}", candidate.id);
+                print_accept_hint(candidate.id);
             }
         }
         tokio::select! {
@@ -147,7 +148,13 @@ pub(super) async fn pairing_session(
             }, if input.is_some() => {
                 input = None;
                 let (id, line) = answer;
-                let line = line??;
+                let line = match line {
+                    Ok(Ok(line)) if !line.is_empty() => line,
+                    _ => {
+                        print_accept_hint(id);
+                        continue;
+                    }
+                };
                 let accept = matches!(line.trim().to_lowercase().as_str(), "y" | "yes");
                 if let Err(error) = pairing::confirm(store, id, accept) {
                     if Timestamp::now() < expires_at
@@ -160,6 +167,11 @@ pub(super) async fn pairing_session(
             _ = tokio::signal::ctrl_c() => return interrupted(),
         }
     }
+}
+
+fn print_accept_hint(id: iroh::EndpointId) {
+    eprintln!("Compare the check code with the device.");
+    eprintln!("yappr pair --accept {id}");
 }
 
 pub(super) async fn join(
@@ -195,6 +207,7 @@ pub(super) async fn join(
                         token: invitation.token.clone(),
                         name: name.clone(),
                         ticket: None,
+                        push: None,
                     },
                 )
                 .await;

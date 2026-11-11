@@ -77,6 +77,9 @@ pub(super) enum Commands {
     /// The body comes from stdin, or from --body. The start command does not
     /// have to run. Without it, post delivers the entry to the devices that
     /// receive the feed.
+    ///
+    /// Exit code 5 means a device did not confirm the saved entry. It can
+    /// still receive a push notification.
     #[clap(after_help = "Examples:
   df -h / | yappr post --source disk --title \"Disk usage\"
   yappr post --kind deploy.finished --subject deploy/web --data '{\"version\":\"1.4.2\"}' --body \"v1.4.2 is live\"
@@ -246,7 +249,7 @@ pub(super) enum Commands {
         #[clap(long, hide = true, conflicts_with = "value")]
         choice: Option<String>,
     },
-    /// Print this machine's identity, feed, peers, questions, and outbox.
+    /// Print this machine's identity, writer, feed, peers, questions, and outbox.
     ///
     /// "reads this feed" means the peer is in this machine's allow list. It
     /// says nothing about access to that peer's feed.
@@ -268,10 +271,23 @@ pub(super) enum Commands {
         #[clap(subcommand)]
         command: AliasCommand,
     },
-    /// Read or change persistent relay settings.
-    Network {
-        #[clap(subcommand)]
-        command: NetworkCommand,
+    /// Show or save the settings for this feed.
+    #[clap(
+        after_help = "Relay and mDNS options are saved here and apply to one run on other commands."
+    )]
+    Config {
+        /// Set the writer name. Pass an empty name to use the computer name.
+        #[clap(long)]
+        name: Option<String>,
+        /// Use the default relays.
+        #[clap(long)]
+        default_relays: bool,
+        /// Find and announce endpoints on the local network (mDNS).
+        #[clap(long)]
+        mdns: bool,
+        /// The output format.
+        #[clap(long, value_enum, default_value = "text")]
+        output: Format,
     },
     /// Probe a writer and print its connection health.
     Health {
@@ -319,16 +335,10 @@ impl Format {
 
 #[derive(Subcommand, Debug)]
 pub(super) enum AliasCommand {
+    /// Save a local name for a device.
     Set { name: String, target: String },
+    /// Remove a local name for a device.
     Remove { name: String },
-}
-#[derive(Subcommand, Debug)]
-pub(super) enum NetworkCommand {
-    Show,
-    Set {
-        #[clap(long)]
-        defaults: bool,
-    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -402,6 +412,9 @@ impl QuestionArgs {
 pub(super) struct ApprovalArgs {
     #[clap(flatten)]
     pub(super) question: QuestionArgs,
+    /// Approve only in the app. The notification can still show Reject.
+    #[clap(long)]
+    pub(super) unlock: bool,
 }
 #[derive(Subcommand, Debug)]
 pub(super) enum HooksCommand {
@@ -488,8 +501,7 @@ pub(super) struct StartArgs {
     /// Pair a device, also when other devices can read the feed.
     #[clap(long)]
     pub(super) pair: bool,
-    /// The writer name shown on the joining device. The default is the host
-    /// name.
+    /// The writer name shown on the joining device. The default comes from config.
     #[clap(long)]
     pub(super) name: Option<String>,
     /// Save the accepted device under this alias. The default comes from the
@@ -508,8 +520,7 @@ pub(super) struct StartArgs {
 
 #[derive(clap::Args, Debug)]
 pub(super) struct PairArgs {
-    /// The writer name shown on the joining device. The default is the host
-    /// name.
+    /// The writer name shown on the joining device. The default comes from config.
     #[clap(long)]
     pub(super) name: Option<String>,
     /// How long the invitation stays open, such as 5m or 1h.

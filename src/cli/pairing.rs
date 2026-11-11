@@ -138,8 +138,7 @@ pub(super) async fn pairing_session(
                 })?;
                 input = Some((candidate.id, receiver));
             } else {
-                eprintln!("Compare the check code with the device.");
-                eprintln!("yappr pair --accept {}", candidate.id);
+                print_accept_hint(candidate.id);
             }
         }
         tokio::select! {
@@ -150,7 +149,13 @@ pub(super) async fn pairing_session(
             }, if input.is_some() => {
                 input = None;
                 let (id, line) = answer;
-                let line = line??;
+                let line = match line {
+                    Ok(Ok(line)) if !line.is_empty() => line,
+                    _ => {
+                        print_accept_hint(id);
+                        continue;
+                    }
+                };
                 let accept = matches!(line.trim().to_lowercase().as_str(), "y" | "yes");
                 if let Err(error) = pairing::confirm(store, id, accept) {
                     if Timestamp::now() < expires_at
@@ -163,6 +168,11 @@ pub(super) async fn pairing_session(
             _ = tokio::signal::ctrl_c() => return interrupted(),
         }
     }
+}
+
+fn print_accept_hint(id: iroh::EndpointId) {
+    eprintln!("Compare the check code with the device.");
+    eprintln!("yappr pair --accept {id}");
 }
 
 pub(super) async fn join(

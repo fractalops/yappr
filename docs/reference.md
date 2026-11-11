@@ -75,6 +75,7 @@ Use `--json` for one entry per JSON input line.
 A device that receives entries, such as the app, gives its address when it pairs. The writer then opens the connection and delivers the feed to that device.
 A running `start` delivers each new entry. Without `start`, `post` delivers the new entries itself and waits up to 20 seconds for each device to confirm them.
 If a device does not confirm, the entry stays in the feed, and `post` returns 5. The next delivery from `start`, `post`, or `retry` sends it.
+The device can still receive a push notification. The notification does not confirm that the device saved the entry.
 
 ```json
 {"v":1,"id":42,"time":"2026-10-27T09:30:00Z","source":"ci","kind":"deploy.finished","level":"info","subject":"deploy/web","title":"Deployed web","body":"v1.4.2 is live.","data":{"version":"1.4.2"}}
@@ -126,8 +127,8 @@ Readers should ignore unknown fields. `read` preserves them in JSON and stops at
 
 ### Signatures
 
-The writer signs each new entry with its identity key. The signature covers the bytes `yappr/entry/1`, a zero byte, the log name, a zero byte, and the entry without `sig` as JSON with sorted keys and no spaces.
-The log name is the `time` of the log's first entry. `read` stops at an entry with a signature that does not match, and returns 4. It makes the same checks on the local feed.
+The writer signs each new entry with its identity key. The signed data starts with `yappr/entry/1`, a zero byte, the log name, and a zero byte. Then comes the entry as JSON, with sorted keys, no spaces, and no `sig` field.
+The log name is the `time` of the log's first entry. `read` stops at an entry with a signature that does not match, and returns 4. The same rule applies to the local feed.
 A feed belongs to the identity that signed its first entry. `post` with another identity fails.
 
 ## Reading
@@ -211,6 +212,13 @@ Both accept `--body`, `--source`, `--level`, `--subject`, `--data`, and `--markd
 `ask` requires 2–12 unique choices. Repeat `--choice VALUE[=LABEL]` for each choice.
 Values contain 1–64 ASCII letters, digits, underscores, or hyphens. Labels contain 1–256 bytes on one line.
 Omitting a label uses its value. `approve` supplies `approve` and `reject`.
+If the browser shows action buttons, you can answer from the notification.
+Use `yappr approve --unlock` to open Yappr when the user selects **Approve**.
+**Reject** still sends the answer from the notification.
+If there are too many choices for the browser, select the notification to open the question.
+
+Run `yappr push --preview title` to show only titles in notifications from this feed.
+Run `yappr push --preview full` to show the sender, body, and choices again.
 
 By default, creation waits and prints the selected value after the writer saves the decision.
 `--no-wait` prints an opaque question ID immediately. This differs from the numeric entry ID.
@@ -336,9 +344,9 @@ Codes ignore letter case and contain the writer's ticket, name, token, and deadl
 | `--alias NAME` | Local alias for the joining device | Derived from its name |
 
 The first authenticated device with the random token claims the invitation. The writer must accept it before granting access.
-Compare the check code on the device with the check code on the writer.
+Compare the six-digit `Check code` on both devices.
 With terminal input, enter `y` if they match. Enter `n` if they differ.
-With input from a pipe, stderr shows the full device ID in the accept command.
+With input from a pipe or when terminal input ends, stderr shows the accept command.
 Run the accept or reject command on the writer in another terminal with the same feed directory:
 
 ```sh
@@ -349,17 +357,17 @@ yappr pair --reject DEVICE_ID
 
 A CLI reader joins with `yappr join CODE --name NAME [--alias NAME]`.
 Here, `--name` names the joining device and `--alias` names the writer locally.
-Acceptance must occur before expiry. The claiming device can retrieve the result for two minutes after the deadline.
+Acceptance must occur before expiry. The claiming device can get the result for two minutes after the deadline.
 `start` keeps serving after pairing ends, including expiry or rejection.
-A device that receives entries, such as the app, gives its address with its request. After acceptance, the writer delivers its feed to that address. It keeps only the device ID and the relays that the writer uses itself, so the device cannot choose other hosts for the writer to contact. See [Delivery](#delivery).
+A device that receives entries, such as the app, gives its address with its request. After acceptance, the writer delivers its feed to that address. It keeps only the device ID and its own relays. The device cannot choose other hosts for the writer to contact. See [Delivery](#delivery).
 
 Aliases name devices locally. They do not grant read access.
 An alias holding only an ID depends on address discovery. Save a ticket to retain explicit addresses.
 Remove an alias before assigning it to another identity.
-`status` lists peers. Its read-access flag describes access to this local feed. Its receive flag shows the devices that get deliveries.
+`status` shows the running writer’s process ID, version, and path. It also lists peers. The read-access flag shows access to this local feed. Its receive flag shows the devices that get deliveries.
 
 Allow-list changes apply without restarting. `deny` closes active feed connections within five seconds.
-The writer checks access on each answer. Unknown devices can reach pairing only while an invitation is pending.
+The writer verifies access on each answer. Unknown devices can reach pairing only while an invitation is pending.
 
 ### When start must run
 
@@ -388,7 +396,7 @@ yappr join YAPPR:... --name laptop --alias computer
 ```
 
 Replace `YAPPR:...` with the code from the writing computer.
-Both terminals show a check code, such as `881 331`.
+Both terminals show the same six-digit code, such as `881 331`.
 If the codes match, enter `y` in the writing computer's terminal.
 It saves the receiving device as `laptop`. The receiving device saves the writer as `computer`.
 

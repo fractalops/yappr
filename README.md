@@ -63,6 +63,7 @@ The command prints an entry number. On your phone, select **Feed** to see
 To receive notifications when Yappr is closed, open **Setup** in the app.
 In **Advanced settings**, select **Notify me when this page is closed**.
 Allow browser notifications. Yappr sends notifications for questions, warnings, and alerts.
+Run `yappr push --preview title` to show only the title in notifications from this feed.
 
 To use a CLI on another computer, see [Connect another CLI](docs/reference.md#connect-another-cli).
 

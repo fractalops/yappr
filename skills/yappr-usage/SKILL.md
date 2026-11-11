@@ -1,6 +1,6 @@
 ---
 name: yappr-usage
-description: Send coding progress, questions, and approvals through Yappr when the user asks to use it or has chosen it for the current task.
+description: "Use when the user asks for Yappr or follows progress away from the desk. Also use when the task needs a decision from a user who reads Yappr on another device."
 ---
 
 # Using yappr from a coding agent

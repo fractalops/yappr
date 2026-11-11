@@ -116,10 +116,16 @@ pub(super) async fn run() -> Result<()> {
                 )
                 .into());
             }
-            questions::ask(common, args.question, args.choices, false).await
+            questions::ask(common, args.question, args.choices, None).await
         }
         Commands::Approve(args) => {
-            questions::ask(common, args.question, choices::approval_options(), true).await
+            questions::ask(
+                common,
+                args.question,
+                choices::approval_options(),
+                Some(args.unlock),
+            )
+            .await
         }
         Commands::Questions { output } => {
             let text = Format::is_text(output);
@@ -152,6 +158,23 @@ pub(super) async fn run() -> Result<()> {
             questions::answer(common, ticket, id, value).await
         }
         Commands::Retry => writer::retry(common).await,
+        Commands::Push { preview } => {
+            let dir = common.dir()?;
+            let preview = match preview.as_deref() {
+                None => yappr::push::Preview::load(&dir)?,
+                Some(value) => {
+                    let preview = if value == "title" {
+                        yappr::push::Preview::Title
+                    } else {
+                        yappr::push::Preview::Full
+                    };
+                    preview.save(&dir)?;
+                    preview
+                }
+            };
+            println!("{}", preview.name());
+            Ok(())
+        }
         Commands::Pair(args) => pairing::pair(common, args).await,
         Commands::Join {
             invitation,

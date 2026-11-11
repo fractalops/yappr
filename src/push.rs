@@ -21,7 +21,7 @@ impl fmt::Debug for Subscription {
 #[cfg(not(wasm_browser))]
 pub(crate) use writer::Registration;
 #[cfg(not(wasm_browser))]
-pub use writer::{clear, notify, notify_after_failure, set};
+pub use writer::{clear, notify, notify_after_failure, set, Preview};
 
 #[cfg(not(wasm_browser))]
 mod writer {
@@ -47,12 +47,51 @@ mod writer {
     const FRESH: SignedDuration = SignedDuration::from_secs(120);
     const MAX_PAYLOAD: usize = 3800;
 
+    #[derive(Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Preview {
+        #[default]
+        Full,
+        Title,
+    }
+
+    impl Preview {
+        pub fn load(dir: &Path) -> Result<Self> {
+            disk::read(&dir.join("push-preview.json"))
+        }
+
+        pub fn save(self, dir: &Path) -> Result<()> {
+            disk::write(&dir.join("push-preview.json"), &self)
+        }
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Self::Full => "full",
+                Self::Title => "title",
+            }
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub(crate) struct Registration {
         subscription: Subscription,
         log: Option<String>,
         through: u64,
         retry_at: Option<Timestamp>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        open: BTreeMap<String, OpenNotice>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        checked: u64,
+    }
+
+    fn is_zero(value: &u64) -> bool {
+        *value == 0
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct OpenNotice {
+        entry: u64,
+        expires_at: Option<Timestamp>,
     }
 
     fn invalid() -> choices::ChoiceError {
@@ -228,6 +267,8 @@ mod writer {
                     log: store.log()?,
                     through: store.last_id()?,
                     retry_at: None,
+                    open: BTreeMap::new(),
+                    checked: 0,
                 }),
                 None => None,
             };
@@ -254,17 +295,40 @@ mod writer {
         kind: &'a str,
         level: Option<&'a str>,
         entry_id: u64,
-        choices: Vec<String>,
+        choices: Vec<choices::Choice>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        writer_id: Option<EndpointId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        question_id: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_at: Option<Timestamp>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        unlock: bool,
     }
 
     fn payload(
         entry: &Entry,
         writer: String,
+        writer_id: Option<EndpointId>,
         question: Option<&choices::Question>,
+        preview: Preview,
     ) -> Result<Vec<u8>> {
-        let title = entry.title.as_deref().unwrap_or(&entry.source);
+        let title_only = matches!(preview, Preview::Title);
+        let title =
+            entry
+                .title
+                .as_deref()
+                .unwrap_or(if title_only { "Yappr" } else { &entry.source });
         let mut notice = Notice {
-            writer,
+            writer: if title_only {
+                String::new()
+            } else {
+                sender_label(
+                    &writer,
+                    &entry.source,
+                    &gethostname::gethostname().to_string_lossy(),
+                )
+            },
             title: title
                 .chars()
                 .filter(|c| !c.is_control())
@@ -278,20 +342,28 @@ mod writer {
             },
             level: entry.level.as_deref(),
             entry_id: entry.id,
-            choices: question.map_or_else(Vec::new, |q| {
+            choices: question.filter(|_| !title_only).map_or_else(Vec::new, |q| {
                 q.options
                     .iter()
-                    .map(|choice| {
-                        choice
+                    .map(|choice| choices::Choice {
+                        value: choice.value.clone(),
+                        label: choice
                             .label
                             .chars()
                             .filter(|c| !c.is_control())
-                            .take(40)
-                            .collect()
+                            .take(32)
+                            .collect(),
                     })
                     .collect()
             }),
+            writer_id,
+            question_id: question.map(|q| q.id.as_str()),
+            expires_at: question.and_then(|q| q.expires_at),
+            unlock: question.is_some_and(|q| q.unlock),
         };
+        if title_only {
+            return serde_json::to_vec(&notice).context("Cannot encode the notification.");
+        }
         let overhead = serde_json::to_vec(&notice)?.len();
         let mut remaining = MAX_PAYLOAD.saturating_sub(overhead);
         let mut end = 0;
@@ -311,11 +383,106 @@ mod writer {
         serde_json::to_vec(&notice).context("Cannot encode the notification.")
     }
 
+    fn sender_label(writer: &str, source: &str, host: &str) -> String {
+        let name = writer
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect::<String>();
+        let host = host.split('.').next().unwrap_or(host);
+        if source.eq_ignore_ascii_case(host) || source.eq_ignore_ascii_case(writer) {
+            name
+        } else {
+            let source: String = source
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(64)
+                .collect();
+            format!("{name} · {source}")
+        }
+    }
+
+    fn computer_name() -> &'static str {
+        static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        NAME.get_or_init(|| {
+            #[cfg(target_os = "macos")]
+            if let Ok(out) = std::process::Command::new("/usr/sbin/scutil")
+                .args(["--get", "ComputerName"])
+                .output()
+            {
+                let name = String::from_utf8_lossy(&out.stdout);
+                if out.status.success() && !name.trim().is_empty() {
+                    return name.trim().into();
+                }
+            }
+            let host = gethostname::gethostname();
+            let host = host.to_string_lossy();
+            host.split('.')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Yappr")
+                .into()
+        })
+    }
+
     struct Pending {
         subscription: Subscription,
         log: Option<String>,
         entry: u64,
         body: Vec<u8>,
+        effect: Effect,
+    }
+
+    enum Effect {
+        Entry(Option<(String, OpenNotice)>),
+        Resolved(String),
+    }
+
+    fn resolution(
+        state: &choices::QuestionState,
+        notice: &OpenNotice,
+        writer_id: Option<EndpointId>,
+        preview: Preview,
+    ) -> Result<Vec<u8>> {
+        let title = match state.status {
+            choices::QuestionStatus::Answered => {
+                let label = state.decision.as_ref().and_then(|decision| {
+                    state
+                        .question
+                        .options
+                        .iter()
+                        .find(|option| option.value == decision.value)
+                });
+                match (preview, label) {
+                    (Preview::Full, Some(label)) => format!(
+                        "Answered: {}",
+                        label
+                            .label
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(40)
+                            .collect::<String>()
+                    ),
+                    _ => "Question answered".into(),
+                }
+            }
+            choices::QuestionStatus::Cancelled => "Question cancelled".into(),
+            choices::QuestionStatus::Expired => "Question expired".into(),
+            choices::QuestionStatus::Pending => unreachable!(),
+        };
+        Ok(serde_json::to_vec(&Notice {
+            writer: String::new(),
+            title,
+            body: "",
+            kind: "resolved",
+            level: None,
+            entry_id: notice.entry,
+            choices: Vec::new(),
+            writer_id,
+            question_id: Some(&state.question.id),
+            expires_at: None,
+            unlock: false,
+        })?)
     }
 
     fn claim(
@@ -348,15 +515,55 @@ mod writer {
             if changed {
                 push.log = log.clone();
                 push.through = 0;
+                push.open.clear();
+                push.checked = 0;
             }
             if saved.log == log && saved.through > push.through {
                 push.through = saved.through;
                 changed = true;
             }
-            if push.retry_at.is_some_and(|retry| retry > now) || store.last_id()? <= push.through {
+            let head = store.last_id()?;
+            let check_resolutions = !push.open.is_empty()
+                && (head > push.checked
+                    || push
+                        .open
+                        .values()
+                        .any(|notice| notice.expires_at.is_some_and(|expires| expires <= now)));
+            if push.retry_at.is_some_and(|retry| retry > now)
+                || (head <= push.through && !check_resolutions)
+            {
                 return Ok((None, changed));
             }
             let entries = store.entries()?;
+            if check_resolutions {
+                for (id, notice) in &push.open {
+                    let Ok(state) = choices::get(&entries, id) else {
+                        continue;
+                    };
+                    if state.status == choices::QuestionStatus::Pending {
+                        continue;
+                    }
+                    let body = resolution(
+                        &state,
+                        notice,
+                        store.writer_id(),
+                        Preview::load(store.dir())?,
+                    )?;
+                    push.retry_at = Some(now + DEBOUNCE);
+                    return Ok((
+                        Some(Pending {
+                            subscription: push.subscription.clone(),
+                            log,
+                            entry: notice.entry,
+                            body,
+                            effect: Effect::Resolved(id.clone()),
+                        }),
+                        true,
+                    ));
+                }
+                push.checked = head;
+                changed = true;
+            }
             let through = push.through;
             for entry in entries.iter().filter(|entry| entry.id > through) {
                 if entry.time + WAIT > now {
@@ -372,7 +579,22 @@ mod writer {
                         && entry.time + FRESH > now
                 };
                 if relevant {
-                    let body = payload(entry, writer, question.as_ref())?;
+                    let body = payload(
+                        entry,
+                        writer,
+                        store.writer_id(),
+                        question.as_ref(),
+                        Preview::load(store.dir())?,
+                    )?;
+                    let effect = Effect::Entry(question.map(|q| {
+                        (
+                            q.id,
+                            OpenNotice {
+                                entry: entry.id,
+                                expires_at: q.expires_at,
+                            },
+                        )
+                    }));
                     push.retry_at = Some(now + DEBOUNCE);
                     return Ok((
                         Some(Pending {
@@ -380,6 +602,7 @@ mod writer {
                             log,
                             entry: entry.id,
                             body,
+                            effect,
                         }),
                         true,
                     ));
@@ -410,7 +633,17 @@ mod writer {
                 StatusCode::NOT_FOUND | StatusCode::GONE => peer.push = None,
                 code if code.is_success() => {
                     if let Some(push) = &mut peer.push {
-                        push.through = push.through.max(pending.entry);
+                        match &pending.effect {
+                            Effect::Entry(notice) => {
+                                push.through = push.through.max(pending.entry);
+                                if let Some((id, notice)) = notice {
+                                    push.open.insert(id.clone(), notice.clone());
+                                }
+                            }
+                            Effect::Resolved(id) => {
+                                push.open.remove(id);
+                            }
+                        }
                     }
                 }
                 _ => return Ok(((), false)),
@@ -438,12 +671,7 @@ mod writer {
     /// Send a notification if the device did not confirm an eligible entry.
     pub async fn notify(store: &Store, device: EndpointId, saved: &Stored) {
         let result = async {
-            let writer = gethostname::gethostname()
-                .to_string_lossy()
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(64)
-                .collect();
+            let writer = computer_name().into();
             let Some(pending) = claim(store, device, saved, writer, Timestamp::now())? else {
                 return Ok(());
             };
@@ -730,7 +958,7 @@ mod writer {
             add(iroh::SecretKey::generate().public());
             let cancelled = add(device);
             choices::cancel(&store, &cancelled.id).unwrap();
-            add(device);
+            let question = add(device);
             let pending = claim(
                 &store,
                 device,
@@ -743,7 +971,93 @@ mod writer {
             let body: serde_json::Value = serde_json::from_slice(&pending.body).unwrap();
             assert_eq!(pending.entry, store.last_id().unwrap());
             assert_eq!(body["kind"], "approval");
-            assert_eq!(body["choices"], serde_json::json!(["Approve", "Reject"]));
+            assert_eq!(body["writer"], "Writer · build");
+            assert_eq!(body["question_id"], question.id);
+            assert_eq!(
+                body["choices"],
+                serde_json::json!(choices::approval_options())
+            );
+
+            Preview::Title.save(store.dir()).unwrap();
+            let private = claim(
+                &store,
+                device,
+                &Stored::default(),
+                "Writer".into(),
+                Timestamp::now() + WAIT + DEBOUNCE,
+            )
+            .unwrap()
+            .unwrap();
+            let private: serde_json::Value = serde_json::from_slice(&private.body).unwrap();
+            assert_eq!(private["title"], "Deploy?");
+            assert_eq!(private["writer"], "");
+            assert_eq!(private["body"], "");
+            assert_eq!(private["choices"], serde_json::json!([]));
+            assert_eq!(private["question_id"], question.id);
+        }
+
+        #[test]
+        fn sends_one_resolution_after_a_pushed_question() {
+            let (_dir, store, device) = store_with_receiver();
+            let store = store.signed_by(iroh::SecretKey::generate());
+            set(&store, device, Some(keys().0)).unwrap();
+            let mut question = choices::new_question(
+                "Deploy?".into(),
+                String::new(),
+                "build".into(),
+                choices::approval_options(),
+                device,
+                None,
+                true,
+            );
+            question.unlock = true;
+            let question = choices::create_with(&store, question, Default::default()).unwrap();
+            let empty = Stored::default();
+            let now = Timestamp::now() + WAIT;
+            let sent = claim(&store, device, &empty, "Writer".into(), now)
+                .unwrap()
+                .unwrap();
+            let message: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+            assert_eq!(message["unlock"], true);
+            assert_eq!(message["writer_id"], store.writer_id().unwrap().to_string());
+            finish(&store, device, &sent, StatusCode::CREATED).unwrap();
+            choices::decide(
+                &store,
+                device,
+                choices::Submission {
+                    id: choices::random_id(),
+                    question_id: question.id.clone(),
+                    value: "approve".into(),
+                },
+            )
+            .unwrap();
+            let now = now + DEBOUNCE;
+            let closed = claim(&store, device, &empty, "Writer".into(), now)
+                .unwrap()
+                .unwrap();
+            let closed_payload: serde_json::Value = serde_json::from_slice(&closed.body).unwrap();
+            assert_eq!(closed_payload["kind"], "resolved");
+            assert_eq!(closed_payload["title"], "Answered: Approve");
+            assert_eq!(closed_payload["question_id"], question.id);
+            assert_eq!(closed_payload["entry_id"], sent.entry);
+            finish(&store, device, &closed, StatusCode::CREATED).unwrap();
+            assert!(
+                claim(&store, device, &empty, "Writer".into(), now + DEBOUNCE)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn sender_uses_the_computer_name_without_a_raw_host_source() {
+            assert_eq!(
+                sender_label("MacBook", "claude", "build-mac.local"),
+                "MacBook · claude"
+            );
+            assert_eq!(
+                sender_label("MacBook", "build-mac", "build-mac.local"),
+                "MacBook"
+            );
         }
 
         async fn round_trip(status: &str) {

@@ -683,13 +683,23 @@ fn init_serves_pairs_one_device_and_keeps_serving() {
 #[cfg(unix)]
 #[test]
 fn pair_exits_when_an_open_terminal_prompt_expires() {
-    use std::os::fd::FromRawFd;
+    check_terminal_pair(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn pair_accepts_from_another_terminal_after_input_ends() {
+    check_terminal_pair(true);
+}
+
+#[cfg(unix)]
+fn check_terminal_pair(end_input: bool) {
+    use std::{io::Write, os::fd::FromRawFd};
 
     let writer = Machine::new();
     let device = Machine::new();
     let _server = Serve::start_with(&writer, &["--timeout", "1s"]);
     let (mut master, mut terminal) = (-1, -1);
-    // The terminal stays open with no input until the pairing command exits.
     assert_eq!(
         unsafe {
             libc::openpty(
@@ -702,10 +712,11 @@ fn pair_exits_when_an_open_terminal_prompt_expires() {
         },
         0
     );
-    let _master = unsafe { std::fs::File::from_raw_fd(master) };
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
     let terminal = unsafe { std::fs::File::from_raw_fd(terminal) };
+    let timeout = if end_input { "15s" } else { "5s" };
     let child = writer
-        .command(&["pair", "--timeout", "5s"])
+        .command(&["pair", "--timeout", timeout])
         .stdin(terminal)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -726,27 +737,52 @@ fn pair_exits_when_an_open_terminal_prompt_expires() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let _join = Serve {
+    let mut join = Serve {
         child,
         ticket: String::new(),
     };
     let stderr = pairing.child.stderr.take().unwrap();
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut output = String::new();
-        BufReader::new(stderr).read_to_string(&mut output).unwrap();
-        let _ = send.send(output);
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
     });
-    let output = receive.recv_timeout(Duration::from_secs(12)).unwrap();
-    assert!(
-        output.contains("Accept if the codes match [y/N]"),
-        "{output}"
-    );
-    assert!(
-        output.contains("the pairing invitation expired"),
-        "{output}"
-    );
-    assert!(!pairing.child.wait().unwrap().success());
+    let wait_for = |text: &str| loop {
+        let line = receive.recv_timeout(Duration::from_secs(12)).unwrap();
+        if line.contains(text) {
+            break;
+        }
+    };
+    wait_for("Accept if the codes match [y/N]");
+    if end_input {
+        master.write_all(b"\x04").unwrap();
+        wait_for("yappr pair --accept ");
+        writer.run(["pair", "--accept", &device.id()]);
+        assert!(pairing.child.wait().unwrap().success());
+        assert!(join.child.wait().unwrap().success());
+    } else {
+        wait_for("the pairing invitation expired");
+        assert!(!pairing.child.wait().unwrap().success());
+    }
+}
+
+#[test]
+fn updating_an_alias_preserves_unknown_peer_fields() {
+    let writer = Machine::new();
+    let device = Machine::new();
+    let id = device.id();
+    writer.run(["alias", "set", "phone", &id]);
+    let path = writer.dir.path().join("peers.json");
+    let mut peers: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    peers["phone"]["future"] = serde_json::json!({"flag": true});
+    std::fs::write(&path, serde_json::to_vec(&peers).unwrap()).unwrap();
+    writer.run(["alias", "set", "phone", &id]);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["phone"]["future"], peers["phone"]["future"]);
 }
 
 #[cfg(unix)]
@@ -824,6 +860,27 @@ fn status_reports_peers_and_questions_as_json_in_a_pipe() {
     assert_eq!(status["peers"][0]["reads"], true);
     assert_eq!(status["questions"]["pending"], 1);
     assert_eq!(status["outbox"]["queued"], 0);
+}
+
+#[test]
+fn status_reports_writer_details_only_while_the_writer_runs() {
+    let writer = Machine::new();
+    let status = || {
+        serde_json::from_str::<serde_json::Value>(&writer.run(["status"])).unwrap()["writer"]
+            .clone()
+    };
+    let server = Serve::start(&writer);
+    let running = status();
+    assert_eq!(running["running"], true);
+    assert_eq!(running["pid"], server.child.id());
+    assert_eq!(running["version"], env!("CARGO_PKG_VERSION"));
+    let binary = std::path::Path::new(running["binary"].as_str().unwrap());
+    assert!(binary.is_absolute());
+    assert_eq!(binary.file_name(), std::path::Path::new(bin()).file_name());
+    drop(server);
+    assert_eq!(status(), serde_json::json!({"running": false}));
+    let _older_writer = yappr::disk::lock(writer.dir.path(), "serve.lock").unwrap();
+    assert_eq!(status(), serde_json::json!({"running": true}));
 }
 
 #[test]
@@ -1338,6 +1395,28 @@ fn ask_needs_a_device_a_question_and_two_choices() {
     assert!(stderr.contains("name the device"), "{stderr}");
     let (code, _, _) = writer.exit(["approve", &responder], b"");
     assert_eq!(code, 2);
+}
+
+#[test]
+fn unlock_is_recorded_only_when_requested() {
+    let (writer, device) = pair();
+    writer.run([
+        "approve",
+        &device.id(),
+        "Open the app?",
+        "--unlock",
+        "--no-wait",
+    ]);
+    writer.run(["approve", &device.id(), "Answer here?", "--no-wait"]);
+    let log = writer.run(["read", "--output", "json"]);
+    let questions: Vec<_> = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter_map(|entry| entry.pointer("/choices/question").cloned())
+        .collect();
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[0]["unlock"], true);
+    assert!(questions[1].get("unlock").is_none());
 }
 
 #[test]

@@ -57,6 +57,10 @@ impl Store {
         &self.dir
     }
 
+    pub(crate) fn writer_id(&self) -> Option<iroh::EndpointId> {
+        self.signer.as_ref().map(iroh::SecretKey::public)
+    }
+
     /// Give the draft the next id and the current time, then append it.
     pub fn append(&self, draft: Draft) -> Result<Entry> {
         draft.validate()?;

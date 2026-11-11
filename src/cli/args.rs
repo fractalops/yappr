@@ -77,6 +77,9 @@ pub(super) enum Commands {
     /// The body comes from stdin, or from --body. The start command does not
     /// have to run. Without it, post delivers the entry to the devices that
     /// receive the feed.
+    ///
+    /// Exit code 5 means a device did not confirm the saved entry. It can
+    /// still receive a push notification.
     #[clap(after_help = "Examples:
   df -h / | yappr post --source disk --title \"Disk usage\"
   yappr post --kind deploy.finished --subject deploy/web --data '{\"version\":\"1.4.2\"}' --body \"v1.4.2 is live\"
@@ -246,7 +249,7 @@ pub(super) enum Commands {
         #[clap(long, hide = true, conflicts_with = "value")]
         choice: Option<String>,
     },
-    /// Print this machine's identity, feed, peers, questions, and outbox.
+    /// Print this machine's identity, writer, feed, peers, questions, and outbox.
     ///
     /// "reads this feed" means the peer is in this machine's allow list. It
     /// says nothing about access to that peer's feed.
@@ -272,6 +275,12 @@ pub(super) enum Commands {
     Network {
         #[clap(subcommand)]
         command: NetworkCommand,
+    },
+    /// Read or change the notification preview for this feed.
+    Push {
+        /// Send the title only, or send the title and details.
+        #[clap(long, value_parser = ["title", "full"])]
+        preview: Option<String>,
     },
     /// Probe a writer and print its connection health.
     Health {
@@ -402,6 +411,10 @@ impl QuestionArgs {
 pub(super) struct ApprovalArgs {
     #[clap(flatten)]
     pub(super) question: QuestionArgs,
+    /// Open the app when the user selects Approve in a notification.
+    /// Reject can still send a reply from the notification.
+    #[clap(long)]
+    pub(super) unlock: bool,
 }
 #[derive(Subcommand, Debug)]
 pub(super) enum HooksCommand {

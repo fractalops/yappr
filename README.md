@@ -64,6 +64,8 @@ To receive notifications when Yappr is closed, open **Setup** in the app.
 In **Advanced settings**, select **Notify me when this page is closed**.
 Allow browser notifications. Yappr sends notifications for questions, warnings, and alerts.
 Run `yappr push --preview title` to show only the title in notifications from this feed.
+Run `yappr push --name "Work Mac"` to set the writer name for new entries and notifications.
+Run `yappr push --name ""` to use the computer name again.
 
 To use a CLI on another computer, see [Connect another CLI](docs/reference.md#connect-another-cli).
 

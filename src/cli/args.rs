@@ -276,11 +276,14 @@ pub(super) enum Commands {
         #[clap(subcommand)]
         command: NetworkCommand,
     },
-    /// Read or change the notification preview for this feed.
+    /// Read or change the notification settings for this feed.
     Push {
         /// Send the title only, or send the title and details.
         #[clap(long, value_parser = ["title", "full"])]
         preview: Option<String>,
+        /// Set the writer name for new entries. Pass an empty name to use the computer name.
+        #[clap(long, conflicts_with = "preview")]
+        name: Option<String>,
     },
     /// Probe a writer and print its connection health.
     Health {

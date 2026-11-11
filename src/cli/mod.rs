@@ -158,8 +158,12 @@ pub(super) async fn run() -> Result<()> {
             questions::answer(common, ticket, id, value).await
         }
         Commands::Retry => writer::retry(common).await,
-        Commands::Push { preview } => {
+        Commands::Push { preview, name } => {
             let dir = common.dir()?;
+            if let Some(name) = name {
+                println!("{}", yappr::writer_name::set(&dir, &name)?);
+                return Ok(());
+            }
             let preview = match preview.as_deref() {
                 None => yappr::push::Preview::load(&dir)?,
                 Some(value) => {

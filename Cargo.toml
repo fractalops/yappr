@@ -1,6 +1,6 @@
 [package]
 name = "yappr"
-version = "0.1.8-rc.2"
+version = "0.1.8-rc.3"
 edition = "2021"
 keywords = ["feed", "cli", "p2p", "iroh", "ndjson"]
 categories = ["command-line-utilities", "network-programming"]

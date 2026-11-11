@@ -34,6 +34,8 @@ pub mod render;
 pub mod server;
 #[cfg(not(wasm_browser))]
 pub mod store;
+#[cfg(not(wasm_browser))]
+pub mod writer_name;
 
 /// The feed protocol identifier.
 ///

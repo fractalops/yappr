@@ -130,6 +130,8 @@ impl Store {
             extra: draft.extra,
         };
         if let Some(secret) = &self.signer {
+            let sender = crate::writer_name::sender(&self.dir, &entry.source)?;
+            entry.extra.insert("sender".into(), sender.into());
             let log = match &first {
                 Some(first) => {
                     let log = first.time.to_string();

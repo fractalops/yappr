@@ -10,6 +10,8 @@ pub struct Subscription {
     pub auth: String,
     pub vapid_private: String,
     pub vapid_public: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_url: Option<String>,
 }
 
 impl fmt::Debug for Subscription {
@@ -27,7 +29,7 @@ pub use writer::{clear, notify, notify_after_failure, set, Preview};
 mod writer {
     use std::{collections::BTreeMap, path::Path, time::Duration};
 
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{anyhow, Result};
     use base64ct::{Base64UrlUnpadded, Encoding};
     use iroh::EndpointId;
     use jiff::{SignedDuration, Timestamp};
@@ -40,12 +42,27 @@ mod writer {
     };
 
     use super::*;
-    use crate::{choices, disk, entry::Entry, peers, proto::Stored, store::Store};
+    use crate::{choices, disk, entry::Entry, peers, proto::Stored, store::Store, writer_name};
 
     const WAIT: SignedDuration = SignedDuration::from_secs(5);
     const DEBOUNCE: SignedDuration = SignedDuration::from_secs(10);
     const FRESH: SignedDuration = SignedDuration::from_secs(120);
     const MAX_PAYLOAD: usize = 3800;
+    const DEFAULT_APP: &str = "https://yappr.run/";
+
+    fn app_url(value: &str) -> Option<Url> {
+        let url = Url::parse(value).ok()?;
+        let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        (url.as_str().len() <= 240
+            && url.host_str().is_some()
+            && (url.scheme() == "https" || (url.scheme() == "http" && loopback))
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.path().ends_with('/'))
+        .then_some(url)
+    }
 
     #[derive(Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
     #[serde(rename_all = "lowercase")]
@@ -149,6 +166,13 @@ mod writer {
 
         pub(crate) fn validate(&self) -> Result<()> {
             endpoint(&self.endpoint)?;
+            if self
+                .app_url
+                .as_deref()
+                .is_some_and(|value| app_url(value).is_none())
+            {
+                return Err(invalid().into());
+            }
             let rng = SystemRandom::new();
             let (key, _, _) = self.keys(&rng)?;
             let secret = EphemeralPrivateKey::generate(&ECDH_P256, &rng).map_err(|_| invalid())?;
@@ -306,34 +330,88 @@ mod writer {
         unlock: bool,
     }
 
+    #[derive(Serialize)]
+    struct Declarative<'a> {
+        web_push: u16,
+        mutable: bool,
+        notification: DeclarativeNotice<'a>,
+        #[serde(flatten)]
+        legacy: &'a Notice<'a>,
+    }
+
+    #[derive(Serialize)]
+    struct DeclarativeNotice<'a> {
+        title: &'a str,
+        body: String,
+        navigate: &'a str,
+        tag: &'a str,
+    }
+
+    fn encode(notice: &Notice<'_>, navigate: Option<&Url>) -> Result<Vec<u8>> {
+        if let (Some(navigate), Some(tag)) = (navigate, notice.question_id) {
+            let hint = match (notice.choices.is_empty(), notice.kind) {
+                (true, _) => "",
+                (false, "approval") => "Approval: Approve or Reject",
+                (false, _) => "Question: Tap to view choices.",
+            };
+            let body = [notice.writer.as_str(), hint, notice.body]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(serde_json::to_vec(&Declarative {
+                web_push: 8030,
+                mutable: true,
+                notification: DeclarativeNotice {
+                    title: &notice.title,
+                    body,
+                    navigate: navigate.as_str(),
+                    tag,
+                },
+                legacy: notice,
+            })?)
+        } else {
+            Ok(serde_json::to_vec(notice)?)
+        }
+    }
+
     fn payload(
         entry: &Entry,
         writer: String,
         writer_id: Option<EndpointId>,
         question: Option<&choices::Question>,
         preview: Preview,
+        subscription: &Subscription,
     ) -> Result<Vec<u8>> {
         let title_only = matches!(preview, Preview::Title);
-        let title =
+        let raw_title =
             entry
                 .title
                 .as_deref()
                 .unwrap_or(if title_only { "Yappr" } else { &entry.source });
+        let title: String = raw_title.chars().filter(|c| !c.is_control()).collect();
         let mut notice = Notice {
             writer: if title_only {
                 String::new()
             } else {
-                sender_label(
-                    &writer,
-                    &entry.source,
-                    &gethostname::gethostname().to_string_lossy(),
-                )
+                entry
+                    .extra
+                    .get("sender")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| writer_name::short(value, 132).to_owned())
+                    .unwrap_or_else(|| {
+                        writer_name::label(
+                            &writer,
+                            &entry.source,
+                            &gethostname::gethostname().to_string_lossy(),
+                        )
+                    })
             },
-            title: title
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(100)
-                .collect(),
+            title: if title.trim().is_empty() {
+                "Yappr".into()
+            } else {
+                writer_name::short(&title, 160).into()
+            },
             body: "",
             kind: if question.is_some_and(|q| q.approval) {
                 "approval"
@@ -347,12 +425,7 @@ mod writer {
                     .iter()
                     .map(|choice| choices::Choice {
                         value: choice.value.clone(),
-                        label: choice
-                            .label
-                            .chars()
-                            .filter(|c| !c.is_control())
-                            .take(32)
-                            .collect(),
+                        label: writer_name::short(&choice.label, 32).to_owned(),
                     })
                     .collect()
             }),
@@ -361,68 +434,44 @@ mod writer {
             expires_at: question.and_then(|q| q.expires_at),
             unlock: question.is_some_and(|q| q.unlock),
         };
-        if title_only {
-            return serde_json::to_vec(&notice).context("Cannot encode the notification.");
+        let mut navigate = None;
+        if let (Some(writer_id), Some(question)) = (writer_id, question) {
+            let mut url = subscription
+                .app_url
+                .as_deref()
+                .and_then(app_url)
+                .unwrap_or_else(|| Url::parse(DEFAULT_APP).expect("valid Yappr URL"));
+            url.query_pairs_mut()
+                .append_pair("writer", &writer_id.to_string())
+                .append_pair("question", &question.id)
+                .append_pair("entry", &entry.id.to_string());
+            navigate = Some(url);
         }
-        let overhead = serde_json::to_vec(&notice)?.len();
-        let mut remaining = MAX_PAYLOAD.saturating_sub(overhead);
-        let mut end = 0;
-        for c in entry.body.chars() {
-            let size = match c {
-                '\u{0000}'..='\u{001f}' => 6,
-                '"' | '\\' => 2,
-                _ => c.len_utf8(),
-            };
-            if size > remaining {
-                break;
-            }
-            end += c.len_utf8();
-            remaining -= size;
+        let overhead = encode(&notice, navigate.as_ref())?.len();
+        if overhead > MAX_PAYLOAD {
+            anyhow::bail!("The notification exceeds the size limit.");
         }
-        notice.body = &entry.body[..end];
-        serde_json::to_vec(&notice).context("Cannot encode the notification.")
-    }
-
-    fn sender_label(writer: &str, source: &str, host: &str) -> String {
-        let name = writer
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(64)
-            .collect::<String>();
-        let host = host.split('.').next().unwrap_or(host);
-        if source.eq_ignore_ascii_case(host) || source.eq_ignore_ascii_case(writer) {
-            name
-        } else {
-            let source: String = source
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(64)
-                .collect();
-            format!("{name} · {source}")
-        }
-    }
-
-    fn computer_name() -> &'static str {
-        static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        NAME.get_or_init(|| {
-            #[cfg(target_os = "macos")]
-            if let Ok(out) = std::process::Command::new("/usr/sbin/scutil")
-                .args(["--get", "ComputerName"])
-                .output()
-            {
-                let name = String::from_utf8_lossy(&out.stdout);
-                if out.status.success() && !name.trim().is_empty() {
-                    return name.trim().into();
+        if !title_only {
+            // The declarative envelope includes the body twice. Reserve the
+            // extra line break before the body in the visible notification.
+            let copies = if navigate.is_some() { 2 } else { 1 };
+            let mut remaining = MAX_PAYLOAD.saturating_sub(overhead + 2) / copies;
+            let mut end = 0;
+            for c in entry.body.chars() {
+                let size = match c {
+                    '\u{0000}'..='\u{001f}' => 6,
+                    '"' | '\\' => 2,
+                    _ => c.len_utf8(),
+                };
+                if size > remaining {
+                    break;
                 }
+                end += c.len_utf8();
+                remaining -= size;
             }
-            let host = gethostname::gethostname();
-            let host = host.to_string_lossy();
-            host.split('.')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("Yappr")
-                .into()
-        })
+            notice.body = &entry.body[..end];
+        }
+        encode(&notice, navigate.as_ref())
     }
 
     struct Pending {
@@ -585,6 +634,7 @@ mod writer {
                         store.writer_id(),
                         question.as_ref(),
                         Preview::load(store.dir())?,
+                        &push.subscription,
                     )?;
                     let effect = Effect::Entry(question.map(|q| {
                         (
@@ -671,7 +721,7 @@ mod writer {
     /// Send a notification if the device did not confirm an eligible entry.
     pub async fn notify(store: &Store, device: EndpointId, saved: &Stored) {
         let result = async {
-            let writer = computer_name().into();
+            let writer = writer_name::sender(store.dir(), "")?;
             let Some(pending) = claim(store, device, saved, writer, Timestamp::now())? else {
                 return Ok(());
             };
@@ -742,6 +792,7 @@ mod writer {
                     auth: b64(&AUTH),
                     vapid_private: b64(&vapid),
                     vapid_public: b64(&public),
+                    app_url: None,
                 },
                 receiver,
             )
@@ -1049,15 +1100,113 @@ mod writer {
         }
 
         #[test]
-        fn sender_uses_the_computer_name_without_a_raw_host_source() {
+        fn declarative_question_uses_the_signed_sender_and_exact_url() {
+            let (dir, store, device) = store_with_receiver();
+            let store = store.signed_by(iroh::SecretKey::generate());
+            writer_name::set(dir.path(), "Work Mac").unwrap();
+            let mut subscription = keys().0;
+            subscription.app_url = Some("https://example.test/preview/".into());
+            set(&store, device, Some(subscription)).unwrap();
+            let question = choices::create_with(
+                &store,
+                choices::new_question(
+                    "Deploy?".into(),
+                    "Ready.".into(),
+                    "build".into(),
+                    choices::approval_options(),
+                    device,
+                    None,
+                    true,
+                ),
+                Default::default(),
+            )
+            .unwrap();
+            let entry = store.entries().unwrap().pop().unwrap();
+            assert_eq!(entry.extra["sender"], "Work Mac · build");
+            let pending = claim(
+                &store,
+                device,
+                &Stored::default(),
+                "Current name".into(),
+                Timestamp::now() + WAIT,
+            )
+            .unwrap()
+            .unwrap();
+            let push: serde_json::Value = serde_json::from_slice(&pending.body).unwrap();
+            assert_eq!(push["web_push"], 8030);
+            assert_eq!(push["mutable"], true);
+            assert_eq!(push["writer"], entry.extra["sender"]);
+            assert_eq!(push["notification"]["title"], push["title"]);
             assert_eq!(
-                sender_label("MacBook", "claude", "build-mac.local"),
-                "MacBook · claude"
+                push["notification"]["body"],
+                "Work Mac · build\nApproval: Approve or Reject\nReady."
             );
-            assert_eq!(
-                sender_label("MacBook", "build-mac", "build-mac.local"),
-                "MacBook"
-            );
+            assert_eq!(push["notification"]["tag"], question.id);
+            let url = Url::parse(push["notification"]["navigate"].as_str().unwrap()).unwrap();
+            assert_eq!(url.origin().ascii_serialization(), "https://example.test");
+            assert_eq!(url.path(), "/preview/");
+            let pairs: BTreeMap<_, _> = url.query_pairs().collect();
+            assert_eq!(pairs["writer"], store.writer_id().unwrap().to_string());
+            assert_eq!(pairs["question"], question.id);
+            assert_eq!(pairs["entry"], entry.id.to_string());
+        }
+
+        #[test]
+        fn declarative_size_limit_keeps_the_target_and_all_choices() {
+            let (dir, store, device) = store_with_receiver();
+            let store = store.signed_by(iroh::SecretKey::generate());
+            writer_name::set(dir.path(), &"\"".repeat(64)).unwrap();
+            let mut subscription = keys().0;
+            subscription.app_url = Some(format!("https://example.test/{}/", "x".repeat(216)));
+            let question = choices::create_with(
+                &store,
+                choices::new_question(
+                    "\"".repeat(160),
+                    "\\\n🙂".repeat(2000),
+                    "\"".repeat(64),
+                    (0..12)
+                        .map(|i| choices::Choice {
+                            value: format!("{}{:02}", "x".repeat(62), i),
+                            label: "\"".repeat(32),
+                        })
+                        .collect(),
+                    device,
+                    None,
+                    false,
+                ),
+                Default::default(),
+            )
+            .unwrap();
+            let entry = store.entries().unwrap().pop().unwrap();
+            let body = payload(
+                &entry,
+                "Old name".into(),
+                store.writer_id(),
+                Some(&question),
+                Preview::Full,
+                &subscription,
+            )
+            .unwrap();
+            assert!(body.len() <= MAX_PAYLOAD);
+            let push: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(push["choices"].as_array().unwrap().len(), 12);
+            assert!(entry.body.starts_with(push["body"].as_str().unwrap()));
+            assert!(push["notification"]["navigate"]
+                .as_str()
+                .unwrap()
+                .contains(&question.id));
+            let private = payload(
+                &entry,
+                "Old name".into(),
+                store.writer_id(),
+                Some(&question),
+                Preview::Title,
+                &subscription,
+            )
+            .unwrap();
+            let private: serde_json::Value = serde_json::from_slice(&private).unwrap();
+            assert_eq!(private["notification"]["body"], "");
+            assert_eq!(private["choices"], serde_json::json!([]));
         }
 
         async fn round_trip(status: &str) {

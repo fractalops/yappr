@@ -1,6 +1,6 @@
 ---
 name: yappr-usage
-description: Use when the user asks for updates or questions through yappr, or is away from the desk while an agent works. Also use when an agent needs a decision from a user who reads yappr on another device.
+description: Send coding progress, questions, and approvals through Yappr when the user asks to use it or has chosen it for the current task.
 ---
 
 # Using yappr from a coding agent
@@ -12,31 +12,33 @@ yappr sends entries and questions from this machine to the user's other devices.
 Run these quietly:
 
 ```sh
-which -a yappr && yappr --version   # several binaries: use the newest by its full path in every call
-yappr status                        # a running writer, and the paired devices
-yappr hooks status                  # are tool permission prompts already sent to a device?
+yappr --version
+yappr status --output text
+yappr hooks status
 ```
 
-The device to use is the peer with `yes` under "receives entries". If more than one peer has `yes`, ask the user which one.
+Use Yappr 0.1.7 or later. If several installs exist, use the full path to the intended binary. Use the same feed for all commands in the task.
 
-If no writer runs or no device is paired, stop. Tell the user what you found and what you suggest, and wait for a yes. Never install, start or pair without that yes.
+For questions, use the alias of the intended peer with `yes` under "receives entries". If several peers qualify and the user has no preference on record, ask which one. A post goes to the feed, so every device that can read that feed can see it. Check that the feed is suitable for the content before posting.
 
-- To install, use the command in the yappr README.
-- To pair, the user runs `yappr start` in their own terminal and leaves it open. Do not run it in the background: it shows a QR code and asks `y/N`. On the phone, the user opens https://yappr.run, selects **Setup**, scans the code, compares the check codes, and enters `y` in their terminal. The alias comes from the device name.
-- After setup, send one test post and ask the user if it arrived.
-- If no hooks are installed, you can suggest `yappr hooks install claude --to <alias>` (or `codex`). Do not run it without a yes: it changes the agent settings.
+If the CLI or a receiving peer is missing, explain the setup. Install, pair, or change hooks only with the user's authorization.
+
+- To install, see the [Yappr README](https://github.com/fractalops/yappr#install).
+- To pair, have the user run `yappr start --pair` in their terminal. On the phone, open [yappr.run](https://yappr.run/), select **Setup**, scan the code, and select **Request pairing**. Compare the two check codes. Enter `y` in the terminal if they match, or `n` if they differ. Use the alias printed after pairing.
+- Send a test post and check that it arrived. A paired receiver can receive while `yappr start` is stopped. Keep the receiver open for live updates and questions.
+- Hooks are optional. If the user asks to send tool permission prompts to the device, see [agent hooks](https://github.com/fractalops/yappr/blob/main/docs/reference.md#agent-hooks).
 
 ## 2. Post updates
 
 Post at milestones only: started, checks pass, blocked, done.
 
 ```sh
-yappr post --markdown --source claude --kind progress --subject pairing-relay \
-  --title "Relay fix committed locally" --body "$(cat <<'EOF'
-Commit `a68ab53` on `test/history-timing`. Not pushed.
+yappr post --markdown --source coding-agent --kind progress --subject build-checks \
+  --title "Build checks passed" --body "$(cat <<'EOF'
+All checks passed.
 
-- The late-relay test passes. The old code fails it.
-- Next: open [PR #9](https://github.com/fractalops/yappr.run/pull/9).
+- `cargo test --locked` passed.
+- Next, run the browser tests.
 EOF
 )"
 ```
@@ -63,18 +65,14 @@ Do not ask only in the terminal. Do not block on `yappr ask` either, because the
 
 1. Send the question without waiting. It prints the question ID. Use that literal ID in the next steps, because shell variables do not persist between tool calls.
    ```sh
-   yappr ask --no-wait <alias> "Push and merge PR #9?" --markdown --source claude \
-     --subject <subject> --level warn --timeout 1h \
-     --body "$(cat <<'EOF'
-   ...the full context...
-   EOF
-   )" --choice merge="Push and merge" --choice wait="Wait"
+   yappr ask --no-wait phone "Run the checks again?" --markdown --source coding-agent \
+     --subject build-checks --timeout 1h \
+     --body "The first run timed out during browser setup." \
+     --choice retry="Run again" --choice wait="Wait"
    ```
-   For a yes or no, use `yappr approve --no-wait`. The question body holds the full context, so no separate post is necessary. Use `--timeout 1h` when the user is away. The default is `10m`.
-2. Run `yappr wait <id>` as a background task. Ask the same question in the terminal with its choices, end with "Answer here or on your phone", and end your turn.
-3. Use the first answer that arrives:
-   - `wait` prints the chosen value and exits 0. A rejected `approve` exits 7.
-   - If the user answers in the terminal, run `yappr cancel <id>` so the phone stops showing the question.
+   For a yes or no, use `yappr approve --no-wait`. Put the full context in the question body. Use `--timeout 1h` when the user needs more time. The default is `10m`. If Yappr prints an ID and reports a delivery failure, keep that ID. The question is already saved.
+2. Ask the same question in the current chat and offer both ways to answer. Run `yappr wait <id>` in the background if your agent can report task completion back to the session. If it cannot, tell the user to return to the chat after answering so you can read the result.
+3. Apply one decision. `wait` prints the selected value and exits 0. A rejected `approve` exits 7. If the user answers in the chat, run `yappr cancel <id>` before acting. If Yappr already saved a device answer, read it with `yappr wait <id>`. Ask the user to resolve any conflict before acting.
 4. Exit 6 means the question expired, and 8 means it was cancelled. Silence is never approval: do not do the action. Post one `--level warn` entry that says what is on hold, say the same in the terminal, and stop.
 
-Tool permission prompts are the job of the hooks, not of this skill.
+Agent hooks handle tool permission prompts.

@@ -32,7 +32,7 @@ Commands operate on the selected local feed unless they name a writer.
 | `alias set NAME ID_OR_TICKET`, `alias remove NAME` | Save or remove a local device name |
 | `id`, `ticket` | Print the local endpoint ID or feed ticket |
 | `status`, `health WRITER` | Inspect local state or probe a writer's connection |
-| `network show`, `network set` | Read or save relay settings |
+| `config` | Show or save the settings for this feed |
 | `hooks install AGENT`, `hooks status`, `hooks remove AGENT` | Connect Claude Code or Codex to a device |
 
 ## Output
@@ -48,7 +48,8 @@ stdout carries command results. Status messages, warnings, and errors go to stde
 | `health`, `status` | Connection health or local state |
 | `start`, `pair` | Pairing code |
 | `join` | Writer's ticket after acceptance |
-| `id`, `ticket`, `network show` | Endpoint ID, ticket, or JSON relay settings |
+| `id`, `ticket` | Endpoint ID or ticket |
+| `config` | Feed settings in text or JSON |
 | `on` | Handler output |
 
 `read`, `health`, and `status` default to text on a terminal and JSON in a pipe or file.
@@ -213,12 +214,10 @@ Both accept `--body`, `--source`, `--level`, `--subject`, `--data`, and `--markd
 Values contain 1–64 ASCII letters, digits, underscores, or hyphens. Labels contain 1–256 bytes on one line.
 Omitting a label uses its value. `approve` supplies `approve` and `reject`.
 If the browser shows action buttons, you can answer from the notification.
-Use `yappr approve --unlock` to open Yappr when the user selects **Approve**.
+Use `yappr approve --unlock` to require approval in Yappr.
+Select the notification to open the question.
 **Reject** still sends the answer from the notification.
 If there are too many choices for the browser, select the notification to open the question.
-
-Run `yappr push --preview title` to show only titles in notifications from this feed.
-Run `yappr push --preview full` to show the sender, body, and choices again.
 
 By default, creation waits and prints the selected value after the writer saves the decision.
 `--no-wait` prints an opaque question ID immediately. This differs from the numeric entry ID.
@@ -486,14 +485,22 @@ Feeds use `$XDG_DATA_HOME/yappr/FEED/` or the platform data directory. `--dir` o
 The private key persists in `secret.key`. `YAPPR_KEY` overrides that key. The older name `IROH_SECRET` also works.
 
 ```sh
-yappr network show
-yappr network set --relay https://relay.example.com
-yappr network set --no-relay
-yappr network set --defaults
+yappr config
+yappr config --output json
+yappr config --name "Work Mac"
+yappr config --name ""
+yappr config --relay https://relay.example.com --relay https://relay2.example.com
+yappr config --default-relays
+yappr config --no-relay
+yappr config --no-mdns
+yappr config --mdns
 ```
 
-`network set` saves settings for this feed directory. Global relay flags override them for one command.
-Restart `start` after changing saved settings. Custom URLs replace this device's home relays. Peers can advertise other relays.
+`config` shows the settings for this feed. You can save more than one setting in one call.
+On other commands, `--relay`, `--no-relay`, and `--no-mdns` apply to that run.
+An empty writer name uses the computer name. `start --name` and `pair --name` set the name for one invitation.
+Restart `start` after a change to the relay or local discovery settings.
+Custom URLs replace this device's home relays. Peers can advertise other relays.
 `--no-relay` requires a reachable direct path. Relays forward encrypted live traffic and cannot read it.
 They do not store entries for offline devices.
 

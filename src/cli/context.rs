@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use iroh::EndpointAddr;
 use yappr::{
+    config::FeedConfig,
     entry,
     net::{self, NetOptions, Network},
     store::Store,
@@ -36,21 +37,29 @@ impl CommonArgs {
     }
 
     pub(super) fn net(&self, port: Option<u16>) -> Result<NetOptions> {
+        let config = FeedConfig::load(&self.dir()?)?;
         let relays = if self.no_relay || !self.relays.is_empty() {
             net::RelaySettings {
                 disabled: self.no_relay,
                 urls: self.relays.clone(),
             }
         } else {
-            net::RelaySettings::load(&self.dir()?)?
+            config.relays
         };
         relays.validate()?;
         Ok(NetOptions {
             port,
-            mdns: !self.no_mdns && self.network == Network::Default,
+            mdns: config.mdns && !self.no_mdns && self.network == Network::Default,
             relays,
             ..self.network.into()
         })
+    }
+
+    pub(super) fn pairing_name(&self, override_name: Option<String>) -> Result<String> {
+        match override_name {
+            Some(name) => Ok(name),
+            None => Ok(FeedConfig::load(&self.dir()?)?.writer_name().to_owned()),
+        }
     }
 
     pub(super) fn secret(&self) -> Result<iroh::SecretKey> {
@@ -76,4 +85,53 @@ pub(super) fn short_ticket(addr: &EndpointAddr) -> EndpointTicket {
         short = short.with_relay_url(relay_url.clone());
     }
     short.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::args::Args;
+    use clap::Parser;
+
+    #[test]
+    fn network_flags_override_saved_settings_for_one_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = ["yappr", "--dir", dir.path().to_str().unwrap()];
+        FeedConfig::update(dir.path(), |config| {
+            config.relays.urls = vec!["https://relay.example.com".into()];
+            config.mdns = false;
+            Ok(())
+        })
+        .unwrap();
+
+        let args = Args::parse_from(base.into_iter().chain(["start"]));
+        let saved = args.common.net(None).unwrap();
+        assert_eq!(saved.relays.urls, ["https://relay.example.com"]);
+        assert!(!saved.mdns);
+
+        let args = Args::parse_from(base.into_iter().chain(["start", "--no-relay"]));
+        let direct = args.common.net(None).unwrap();
+        assert!(direct.relays.disabled);
+        assert!(!direct.mdns);
+        assert_eq!(FeedConfig::load(dir.path()).unwrap().relays, saved.relays);
+
+        let args = Args::parse_from(base.into_iter().chain([
+            "start",
+            "--relay",
+            "https://other.example.com",
+        ]));
+        assert_eq!(
+            args.common.net(None).unwrap().relays.urls,
+            ["https://other.example.com"]
+        );
+
+        FeedConfig::update(dir.path(), |config| {
+            config.mdns = true;
+            Ok(())
+        })
+        .unwrap();
+        let args = Args::parse_from(base.into_iter().chain(["--no-mdns", "start"]));
+        assert!(!args.common.net(None).unwrap().mdns);
+        assert!(FeedConfig::load(dir.path()).unwrap().mdns);
+    }
 }

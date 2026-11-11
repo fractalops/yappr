@@ -271,19 +271,23 @@ pub(super) enum Commands {
         #[clap(subcommand)]
         command: AliasCommand,
     },
-    /// Read or change persistent relay settings.
-    Network {
-        #[clap(subcommand)]
-        command: NetworkCommand,
-    },
-    /// Read or change the notification settings for this feed.
-    Push {
-        /// Send the title only, or send the title and details.
-        #[clap(long, value_parser = ["title", "full"])]
-        preview: Option<String>,
-        /// Set the writer name for new entries. Pass an empty name to use the computer name.
-        #[clap(long, conflicts_with = "preview")]
+    /// Show or save the settings for this feed.
+    #[clap(
+        after_help = "Relay and mDNS options are saved here and apply to one run on other commands."
+    )]
+    Config {
+        /// Set the writer name. Pass an empty name to use the computer name.
+        #[clap(long)]
         name: Option<String>,
+        /// Use the default relays.
+        #[clap(long)]
+        default_relays: bool,
+        /// Find and announce endpoints on the local network (mDNS).
+        #[clap(long)]
+        mdns: bool,
+        /// The output format.
+        #[clap(long, value_enum, default_value = "text")]
+        output: Format,
     },
     /// Probe a writer and print its connection health.
     Health {
@@ -331,16 +335,10 @@ impl Format {
 
 #[derive(Subcommand, Debug)]
 pub(super) enum AliasCommand {
+    /// Save a local name for a device.
     Set { name: String, target: String },
+    /// Remove a local name for a device.
     Remove { name: String },
-}
-#[derive(Subcommand, Debug)]
-pub(super) enum NetworkCommand {
-    Show,
-    Set {
-        #[clap(long)]
-        defaults: bool,
-    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -414,8 +412,7 @@ impl QuestionArgs {
 pub(super) struct ApprovalArgs {
     #[clap(flatten)]
     pub(super) question: QuestionArgs,
-    /// Open the app when the user selects Approve in a notification.
-    /// Reject can still send a reply from the notification.
+    /// Approve only in the app. The notification can still show Reject.
     #[clap(long)]
     pub(super) unlock: bool,
 }
@@ -504,8 +501,7 @@ pub(super) struct StartArgs {
     /// Pair a device, also when other devices can read the feed.
     #[clap(long)]
     pub(super) pair: bool,
-    /// The writer name shown on the joining device. The default is the host
-    /// name.
+    /// The writer name shown on the joining device. The default comes from config.
     #[clap(long)]
     pub(super) name: Option<String>,
     /// Save the accepted device under this alias. The default comes from the
@@ -524,8 +520,7 @@ pub(super) struct StartArgs {
 
 #[derive(clap::Args, Debug)]
 pub(super) struct PairArgs {
-    /// The writer name shown on the joining device. The default is the host
-    /// name.
+    /// The writer name shown on the joining device. The default comes from config.
     #[clap(long)]
     pub(super) name: Option<String>,
     /// How long the invitation stays open, such as 5m or 1h.

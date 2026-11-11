@@ -1398,6 +1398,73 @@ fn ask_needs_a_device_a_question_and_two_choices() {
 }
 
 #[test]
+fn config_shows_and_saves_feed_settings() {
+    let writer = Machine::new();
+    let json = || {
+        serde_json::from_str::<serde_json::Value>(&writer.run(["config", "--output", "json"]))
+            .unwrap()
+    };
+    assert_eq!(
+        json(),
+        serde_json::json!({
+            "name": null,
+            "relays": {"disabled": false, "urls": []},
+            "mdns": true,
+        })
+    );
+    assert!(writer.run(["config"]).contains("(computer name)"));
+    assert!(!writer.dir.path().join("config.json").exists());
+
+    writer.run([
+        "config",
+        "--relay",
+        "https://relay.example.com",
+        "--relay",
+        "https://relay2.example.com",
+        "--no-mdns",
+        "--name",
+        "Work Mac",
+    ]);
+    let custom = serde_json::json!({
+        "name": "Work Mac",
+        "relays": {"disabled": false, "urls": ["https://relay.example.com", "https://relay2.example.com"]},
+        "mdns": false,
+    });
+    assert_eq!(json(), custom);
+    assert_eq!(writer.run(["config"]), "Writer name: Work Mac\nRelays: https://relay.example.com, https://relay2.example.com\nLocal discovery: Off\n");
+
+    writer.fail(["config", "--relay", "file:///tmp", "--name", "Other"]);
+    writer.fail(["--no-relay", "config", "--default-relays"]);
+    writer.fail(["--no-mdns", "config", "--mdns"]);
+    assert_eq!(json(), custom);
+
+    writer.run(["--no-relay", "--no-mdns", "id"]);
+    assert_eq!(json(), custom);
+    writer.run(["config", "--no-relay"]);
+    assert_eq!(
+        json()["relays"],
+        serde_json::json!({"disabled": true, "urls": []})
+    );
+    assert_eq!(json()["name"], "Work Mac");
+    writer.run(["config", "--default-relays"]);
+    assert_eq!(
+        json()["relays"],
+        serde_json::json!({"disabled": false, "urls": []})
+    );
+    assert_eq!(json()["mdns"], false);
+    writer.run(["config", "--mdns"]);
+    assert_eq!(json()["mdns"], true);
+    writer.run(["config", "--name", ""]);
+    assert!(json()["name"].is_null());
+    assert!(writer.run(["config"]).contains("(computer name)"));
+
+    for command in ["network", "push"] {
+        let (_, stderr) = writer.fail([command]);
+        assert!(stderr.contains("unrecognized subcommand"), "{stderr}");
+    }
+}
+
+#[test]
 fn unlock_is_recorded_only_when_requested() {
     let (writer, device) = pair();
     writer.run([
@@ -1530,36 +1597,6 @@ fn health_reports_the_selected_path_and_denied_access() {
     let (exit, output, _) = device.exit(["health", "laptop", "--output", "text"], b"");
     assert_eq!((exit, output.as_str()), (3, "laptop: denied\n"));
 }
-#[test]
-fn relay_settings_persist_and_validate_without_replacing_good_settings() {
-    let machine = Machine::new();
-    machine.run([
-        "network",
-        "set",
-        "--relay",
-        "https://relay.example.com",
-        "--relay",
-        "http://127.0.0.1:3340",
-    ]);
-    let custom: serde_json::Value =
-        serde_json::from_str(&machine.run(["network", "show"])).unwrap();
-    assert_eq!(custom["urls"].as_array().unwrap().len(), 2);
-    machine.fail(["network", "set", "--relay", "ftp://relay.example.com"]);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&machine.run(["network", "show"])).unwrap(),
-        custom
-    );
-    machine.run(["network", "set", "--no-relay"]);
-    assert!(machine
-        .run(["network", "show"])
-        .contains("\"disabled\":true"));
-    machine.run(["network", "set", "--defaults"]);
-    assert_eq!(
-        machine.run(["network", "show"]).trim(),
-        "{\"disabled\":false,\"urls\":[]}"
-    );
-}
-
 #[test]
 fn one_denied_writer_does_not_discard_another_writers_entries() {
     let good = Machine::new();

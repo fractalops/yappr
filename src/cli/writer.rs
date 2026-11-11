@@ -347,7 +347,7 @@ pub(super) async fn start(common: &CommonArgs, args: StartArgs, pairing: Pairing
         start_serving(common, args.port, pairing == Pairing::Never).await?;
     let first = store.allow_list().load()?.is_empty();
     if pairing == Pairing::Always || (pairing == Pairing::First && first) {
-        let name = args.name.unwrap_or_else(hostname);
+        let name = common.pairing_name(args.name)?;
         let outcome = pairing_session(
             common,
             &store,

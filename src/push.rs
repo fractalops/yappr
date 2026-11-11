@@ -23,7 +23,7 @@ impl fmt::Debug for Subscription {
 #[cfg(not(wasm_browser))]
 pub(crate) use writer::Registration;
 #[cfg(not(wasm_browser))]
-pub use writer::{clear, notify, notify_after_failure, set, Preview};
+pub use writer::{clear, notify, notify_after_failure, set};
 
 #[cfg(not(wasm_browser))]
 mod writer {
@@ -62,31 +62,6 @@ mod writer {
             && url.fragment().is_none()
             && url.path().ends_with('/'))
         .then_some(url)
-    }
-
-    #[derive(Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
-    #[serde(rename_all = "lowercase")]
-    pub enum Preview {
-        #[default]
-        Full,
-        Title,
-    }
-
-    impl Preview {
-        pub fn load(dir: &Path) -> Result<Self> {
-            disk::read(&dir.join("push-preview.json"))
-        }
-
-        pub fn save(self, dir: &Path) -> Result<()> {
-            disk::write(&dir.join("push-preview.json"), &self)
-        }
-
-        pub fn name(self) -> &'static str {
-            match self {
-                Self::Full => "full",
-                Self::Title => "title",
-            }
-        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,10 +324,10 @@ mod writer {
 
     fn encode(notice: &Notice<'_>, navigate: Option<&Url>) -> Result<Vec<u8>> {
         if let (Some(navigate), Some(tag)) = (navigate, notice.question_id) {
-            let hint = match (notice.choices.is_empty(), notice.kind) {
-                (true, _) => "",
-                (false, "approval") => "Approval: Approve or Reject",
-                (false, _) => "Question: Tap to view choices.",
+            let hint = match (notice.kind, notice.unlock) {
+                ("approval", true) => "Tap the notification to approve.",
+                ("approval", false) => "Approval: Approve or Reject",
+                _ => "Question: Tap to view choices.",
             };
             let body = [notice.writer.as_str(), hint, notice.body]
                 .into_iter()
@@ -380,33 +355,23 @@ mod writer {
         writer: String,
         writer_id: Option<EndpointId>,
         question: Option<&choices::Question>,
-        preview: Preview,
         subscription: &Subscription,
     ) -> Result<Vec<u8>> {
-        let title_only = matches!(preview, Preview::Title);
-        let raw_title =
-            entry
-                .title
-                .as_deref()
-                .unwrap_or(if title_only { "Yappr" } else { &entry.source });
+        let raw_title = entry.title.as_deref().unwrap_or(&entry.source);
         let title: String = raw_title.chars().filter(|c| !c.is_control()).collect();
         let mut notice = Notice {
-            writer: if title_only {
-                String::new()
-            } else {
-                entry
-                    .extra
-                    .get("sender")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|value| writer_name::short(value, 132).to_owned())
-                    .unwrap_or_else(|| {
-                        writer_name::label(
-                            &writer,
-                            &entry.source,
-                            &gethostname::gethostname().to_string_lossy(),
-                        )
-                    })
-            },
+            writer: entry
+                .extra
+                .get("sender")
+                .and_then(serde_json::Value::as_str)
+                .map(|value| writer_name::short(value, 132).to_owned())
+                .unwrap_or_else(|| {
+                    writer_name::label(
+                        &writer,
+                        &entry.source,
+                        &gethostname::gethostname().to_string_lossy(),
+                    )
+                }),
             title: if title.trim().is_empty() {
                 "Yappr".into()
             } else {
@@ -420,9 +385,10 @@ mod writer {
             },
             level: entry.level.as_deref(),
             entry_id: entry.id,
-            choices: question.filter(|_| !title_only).map_or_else(Vec::new, |q| {
+            choices: question.map_or_else(Vec::new, |q| {
                 q.options
                     .iter()
+                    .filter(|choice| !(q.approval && q.unlock) || choice.value == "reject")
                     .map(|choice| choices::Choice {
                         value: choice.value.clone(),
                         label: writer_name::short(&choice.label, 32).to_owned(),
@@ -451,26 +417,24 @@ mod writer {
         if overhead > MAX_PAYLOAD {
             anyhow::bail!("The notification exceeds the size limit.");
         }
-        if !title_only {
-            // The declarative envelope includes the body twice. Reserve the
-            // extra line break before the body in the visible notification.
-            let copies = if navigate.is_some() { 2 } else { 1 };
-            let mut remaining = MAX_PAYLOAD.saturating_sub(overhead + 2) / copies;
-            let mut end = 0;
-            for c in entry.body.chars() {
-                let size = match c {
-                    '\u{0000}'..='\u{001f}' => 6,
-                    '"' | '\\' => 2,
-                    _ => c.len_utf8(),
-                };
-                if size > remaining {
-                    break;
-                }
-                end += c.len_utf8();
-                remaining -= size;
+        // The declarative envelope includes the body twice. Reserve the
+        // extra line break before the body in the visible notification.
+        let copies = if navigate.is_some() { 2 } else { 1 };
+        let mut remaining = MAX_PAYLOAD.saturating_sub(overhead + 2) / copies;
+        let mut end = 0;
+        for c in entry.body.chars() {
+            let size = match c {
+                '\u{0000}'..='\u{001f}' => 6,
+                '"' | '\\' => 2,
+                _ => c.len_utf8(),
+            };
+            if size > remaining {
+                break;
             }
-            notice.body = &entry.body[..end];
+            end += c.len_utf8();
+            remaining -= size;
         }
+        notice.body = &entry.body[..end];
         encode(&notice, navigate.as_ref())
     }
 
@@ -491,7 +455,6 @@ mod writer {
         state: &choices::QuestionState,
         notice: &OpenNotice,
         writer_id: Option<EndpointId>,
-        preview: Preview,
     ) -> Result<Vec<u8>> {
         let title = match state.status {
             choices::QuestionStatus::Answered => {
@@ -502,8 +465,8 @@ mod writer {
                         .iter()
                         .find(|option| option.value == decision.value)
                 });
-                match (preview, label) {
-                    (Preview::Full, Some(label)) => format!(
+                match label {
+                    Some(label) => format!(
                         "Answered: {}",
                         label
                             .label
@@ -592,12 +555,7 @@ mod writer {
                     if state.status == choices::QuestionStatus::Pending {
                         continue;
                     }
-                    let body = resolution(
-                        &state,
-                        notice,
-                        store.writer_id(),
-                        Preview::load(store.dir())?,
-                    )?;
+                    let body = resolution(&state, notice, store.writer_id())?;
                     push.retry_at = Some(now + DEBOUNCE);
                     return Ok((
                         Some(Pending {
@@ -633,7 +591,6 @@ mod writer {
                         writer,
                         store.writer_id(),
                         question.as_ref(),
-                        Preview::load(store.dir())?,
                         &push.subscription,
                     )?;
                     let effect = Effect::Entry(question.map(|q| {
@@ -1028,23 +985,6 @@ mod writer {
                 body["choices"],
                 serde_json::json!(choices::approval_options())
             );
-
-            Preview::Title.save(store.dir()).unwrap();
-            let private = claim(
-                &store,
-                device,
-                &Stored::default(),
-                "Writer".into(),
-                Timestamp::now() + WAIT + DEBOUNCE,
-            )
-            .unwrap()
-            .unwrap();
-            let private: serde_json::Value = serde_json::from_slice(&private.body).unwrap();
-            assert_eq!(private["title"], "Deploy?");
-            assert_eq!(private["writer"], "");
-            assert_eq!(private["body"], "");
-            assert_eq!(private["choices"], serde_json::json!([]));
-            assert_eq!(private["question_id"], question.id);
         }
 
         #[test]
@@ -1070,6 +1010,23 @@ mod writer {
                 .unwrap();
             let message: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
             assert_eq!(message["unlock"], true);
+            assert_eq!(
+                message["choices"],
+                serde_json::json!([{"value": "reject", "label": "Reject"}])
+            );
+            assert_eq!(
+                message["notification"]["body"],
+                format!(
+                    "{}\nTap the notification to approve.",
+                    message["writer"].as_str().unwrap()
+                )
+            );
+            let navigate =
+                Url::parse(message["notification"]["navigate"].as_str().unwrap()).unwrap();
+            assert!(navigate
+                .query_pairs()
+                .any(|(key, value)| key == "question" && value == question.id));
+
             assert_eq!(message["writer_id"], store.writer_id().unwrap().to_string());
             finish(&store, device, &sent, StatusCode::CREATED).unwrap();
             choices::decide(
@@ -1103,7 +1060,8 @@ mod writer {
         fn declarative_question_uses_the_signed_sender_and_exact_url() {
             let (dir, store, device) = store_with_receiver();
             let store = store.signed_by(iroh::SecretKey::generate());
-            writer_name::set(dir.path(), "Work Mac").unwrap();
+            crate::config::FeedConfig::update(dir.path(), |config| config.set_name("Work Mac"))
+                .unwrap();
             let mut subscription = keys().0;
             subscription.app_url = Some("https://example.test/preview/".into());
             set(&store, device, Some(subscription)).unwrap();
@@ -1155,7 +1113,10 @@ mod writer {
         fn declarative_size_limit_keeps_the_target_and_all_choices() {
             let (dir, store, device) = store_with_receiver();
             let store = store.signed_by(iroh::SecretKey::generate());
-            writer_name::set(dir.path(), &"\"".repeat(64)).unwrap();
+            crate::config::FeedConfig::update(dir.path(), |config| {
+                config.set_name(&"\"".repeat(64))
+            })
+            .unwrap();
             let mut subscription = keys().0;
             subscription.app_url = Some(format!("https://example.test/{}/", "x".repeat(216)));
             let question = choices::create_with(
@@ -1183,7 +1144,6 @@ mod writer {
                 "Old name".into(),
                 store.writer_id(),
                 Some(&question),
-                Preview::Full,
                 &subscription,
             )
             .unwrap();
@@ -1195,18 +1155,6 @@ mod writer {
                 .as_str()
                 .unwrap()
                 .contains(&question.id));
-            let private = payload(
-                &entry,
-                "Old name".into(),
-                store.writer_id(),
-                Some(&question),
-                Preview::Title,
-                &subscription,
-            )
-            .unwrap();
-            let private: serde_json::Value = serde_json::from_slice(&private).unwrap();
-            assert_eq!(private["notification"]["body"], "");
-            assert_eq!(private["choices"], serde_json::json!([]));
         }
 
         async fn round_trip(status: &str) {

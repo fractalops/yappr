@@ -2,9 +2,7 @@ use std::{path::Path, sync::OnceLock};
 
 use anyhow::{bail, Result};
 
-use crate::disk;
-
-const NAME_FILE: &str = "writer-name.json";
+use crate::config::FeedConfig;
 
 pub(crate) fn short(text: &str, max: usize) -> &str {
     let mut end = max.min(text.len());
@@ -14,14 +12,12 @@ pub(crate) fn short(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-pub fn set(dir: &Path, name: &str) -> Result<String> {
+pub(crate) fn validate(name: &str) -> Result<Option<String>> {
     let name = name.trim();
     if name.len() > 64 || name.chars().any(char::is_control) {
         bail!("Use a writer name of at most 64 bytes and no control characters.");
     }
-    let custom = (!name.is_empty()).then_some(name);
-    disk::write(&dir.join(NAME_FILE), &custom)?;
-    Ok(custom.unwrap_or_else(|| platform_name()).to_owned())
+    Ok((!name.is_empty()).then(|| name.to_owned()))
 }
 
 fn system_name() -> Option<String> {
@@ -77,7 +73,7 @@ fn choose_name(system: Option<&str>, host: &str) -> String {
         .expect("the default writer name is set")
 }
 
-fn platform_name() -> &'static str {
+pub(crate) fn platform_name() -> &'static str {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
         choose_name(
@@ -88,9 +84,9 @@ fn platform_name() -> &'static str {
 }
 
 pub(crate) fn sender(dir: &Path, source: &str) -> Result<String> {
-    let custom: Option<String> = disk::read(&dir.join(NAME_FILE))?;
+    let config = FeedConfig::load(dir)?;
     Ok(label(
-        custom.as_deref().unwrap_or_else(|| platform_name()),
+        config.writer_name(),
         source,
         &gethostname::gethostname().to_string_lossy(),
     ))
@@ -139,11 +135,11 @@ mod tests {
     #[test]
     fn override_is_saved_and_can_be_reset() {
         let dir = tempfile::tempdir().unwrap();
-        set(dir.path(), "Work Mac").unwrap();
+        FeedConfig::update(dir.path(), |config| config.set_name("Work Mac")).unwrap();
         assert_eq!(sender(dir.path(), "build").unwrap(), "Work Mac · build");
         assert_eq!(label("Work Mac", "mac", "mac.local"), "Work Mac");
-        assert!(set(dir.path(), "bad\nname").is_err());
-        set(dir.path(), "").unwrap();
+        assert!(FeedConfig::update(dir.path(), |config| config.set_name("bad\nname")).is_err());
+        FeedConfig::update(dir.path(), |config| config.set_name("")).unwrap();
         assert_eq!(
             sender(dir.path(), "build").unwrap(),
             format!("{} · build", platform_name())

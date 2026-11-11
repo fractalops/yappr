@@ -17,6 +17,8 @@ pub mod push;
 #[cfg(not(wasm_browser))]
 pub mod access;
 #[cfg(not(wasm_browser))]
+pub mod config;
+#[cfg(not(wasm_browser))]
 pub mod cursor;
 #[cfg(not(wasm_browser))]
 pub mod disk;

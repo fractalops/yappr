@@ -82,19 +82,6 @@ impl RelaySettings {
         }
         Ok(())
     }
-    #[cfg(not(wasm_browser))]
-    pub fn load(dir: &Path) -> Result<Self> {
-        let settings: Self = crate::disk::read(&dir.join("network.json"))?;
-        settings.validate()?;
-        Ok(settings)
-    }
-    #[cfg(not(wasm_browser))]
-    pub fn save(&self, dir: &Path) -> Result<()> {
-        self.validate()?;
-        let _lock = crate::disk::lock(dir, "network.lock")?;
-        crate::disk::write(&dir.join("network.json"), self)
-    }
-
     /// The relay mode of these settings: the n0 relays or the custom relays,
     /// with each URL as [`without_trailing_dot`] gives it.
     fn relay_mode(&self) -> Result<RelayMode> {

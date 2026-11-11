@@ -13,7 +13,6 @@ use yappr::{
 
 use super::{
     args::{CommonArgs, PairArgs},
-    context::hostname,
     qr::print_qr,
 };
 
@@ -34,7 +33,7 @@ pub(super) async fn pair(common: &CommonArgs, args: PairArgs) -> Result<()> {
     }
     let ticket: Option<String> = disk::read(&store.dir().join("endpoint.json"))?;
     let ticket = ticket.context("run \"yappr start\" before you create an invitation")?;
-    let name = args.name.unwrap_or_else(hostname);
+    let name = common.pairing_name(args.name)?;
     match pairing_session(common, &store, ticket, name, args.expires, args.alias).await? {
         PairOutcome::Expired => bail!("the pairing invitation expired"),
         _ => Ok(()),

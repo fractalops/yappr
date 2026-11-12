@@ -340,8 +340,16 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
         },
         Event::PostToolUse | Event::PostToolUseFailure => {
             let failed = event == Event::PostToolUseFailure;
-            let target = summary(tool, input.tool_input.as_ref(), input.cwd.as_deref());
-            let mut step = format!("{}{}", code(tool), if failed { " failed" } else { "" });
+            let status = if failed { " failed" } else { "" };
+            let label = preview(tool, MAX_STEP - status.len());
+            let budget = MAX_STEP.saturating_sub(label.len() + status.len() + " · ".len());
+            let target = summary(
+                tool,
+                input.tool_input.as_ref(),
+                input.cwd.as_deref(),
+                budget,
+            );
+            let mut step = format!("{}{status}", code(&label));
             if !target.is_empty() {
                 step.push_str(&format!(" · {}", code(&target)));
             }
@@ -430,8 +438,8 @@ fn describe(input: Option<&Value>) -> String {
     }
 }
 
-/// The most input text in one recent step.
-const MAX_STEP: usize = 80;
+/// The most text in one recent step.
+const MAX_STEP: usize = 40;
 /// The most bytes of a tool result on the activity card.
 const MAX_RESULT: usize = 2 * 1024;
 
@@ -459,7 +467,7 @@ fn output_of(response: &Value) -> String {
 
 /// The main argument of a tool, on one line, such as the command or the
 /// file path. A path in the working directory `cwd` is relative.
-fn summary(tool: &str, input: Option<&Value>, cwd: Option<&str>) -> String {
+fn summary(tool: &str, input: Option<&Value>, cwd: Option<&str>, max: usize) -> String {
     let Some(input) = input else {
         return String::new();
     };
@@ -487,11 +495,20 @@ fn summary(tool: &str, input: Option<&Value>, cwd: Option<&str>) -> String {
         Some(prefix) => main.strip_prefix(&prefix).unwrap_or(main),
         None => main,
     };
-    let line = main.lines().next().unwrap_or_default();
-    let mut out = one_line(line, MAX_STEP);
-    if out.len() < main.trim_end().len() {
-        out.push('…');
+    preview(main, max)
+}
+
+/// The first line, with an ellipsis if more text follows.
+fn preview(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    if line.len() <= max && line.len() >= text.trim_end().len() {
+        return one_line(line, max);
     }
+    if max <= '…'.len_utf8() {
+        return String::new();
+    }
+    let mut out = one_line(line, max - '…'.len_utf8());
+    out.push('…');
     out
 }
 
@@ -995,6 +1012,7 @@ mod tests {
             output_of(&json!({"type": "text", "file": {"content": "x"}})),
             ""
         );
+        assert_eq!(preview("printf a long command", 12), "printf a …");
     }
 
     #[test]

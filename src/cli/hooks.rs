@@ -221,7 +221,7 @@ fn activity(
         let last = store.entries()?.into_iter().rev().find(|e| {
             e.kind == "state" && e.source == agent.name() && e.subject.as_deref() == Some(&subject)
         });
-        let last = last.as_ref().and_then(|e| e.data.as_ref());
+        let last = last.as_ref().and_then(|e| e.extra.get("activity"));
         if let Some(serde_json::Value::Array(old)) = last.and_then(|d| d.get("steps")) {
             steps.clone_from(old);
         }
@@ -261,8 +261,8 @@ fn activity(
         title: Some(title),
         body,
         format: Some("markdown".into()),
-        data: Some(data),
-        extra: Default::default(),
+        data: None,
+        extra: [("activity".into(), data.into())].into_iter().collect(),
     })
 }
 
@@ -348,6 +348,11 @@ mod tests {
             add(Some(step), None);
         }
         let entry = add(Some("file e"), None);
+        assert!(entry.data.is_none());
+        assert_eq!(
+            entry.extra["activity"]["steps"].as_array().unwrap().len(),
+            5
+        );
         assert_eq!(
             entry.body,
             "- file a\n- file b\n- file c\n- file d\n- file e\n\nLast result:\n```\nOutput\n```"

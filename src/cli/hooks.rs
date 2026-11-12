@@ -7,7 +7,6 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use jiff::Timestamp;
-use tokio::time::timeout;
 use yappr::{
     choices::{self, QuestionStatus},
     config::{FeedConfig, HookSettings, HookWhen},
@@ -107,9 +106,10 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
     if action == Action::Nothing {
         return Ok(None);
     }
-    if settings.when == HookWhen::Away
-        && super::presence::presence() == super::presence::Presence::Here
-    {
+    // Where yappr cannot tell, such as over SSH, the user can be at the
+    // terminal. Act only when the user is surely away.
+    let watch = settings.when == HookWhen::Away;
+    if watch && super::presence::presence() != super::presence::Presence::Away {
         return Ok(None);
     }
     let store = common.store()?;
@@ -181,9 +181,23 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
             // The question expires at the deadline, and a decision cannot
             // arrive after it. Read the state once more, in case a decision
             // reached disk at the deadline.
-            let state = match timeout(settings.wait, final_state(common, &question.id)).await {
-                Ok(state) => state,
-                Err(_) => store
+            let here = || super::presence::presence() == super::presence::Presence::Here;
+            let answer = final_state(common, &question.id);
+            let state = match wait_away(answer, settings.wait, watch.then_some(here), RECHECK).await
+            {
+                Wait::Done(state) => state,
+                // The user is back. Stop the request on the device, and let
+                // the agent ask in the terminal.
+                Wait::Back => {
+                    choices::cancel(&store, &question.id).ok();
+                    deliver_later(
+                        &store,
+                        args.agent,
+                        store.entries()?.last().map_or(0, |e| e.id),
+                    )?;
+                    return Ok(None);
+                }
+                Wait::TimedOut => store
                     .entries()
                     .and_then(|entries| choices::get(&entries, &question.id)),
             };
@@ -196,6 +210,42 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                 Err(error) => {
                     choices::cancel(&store, &question.id).ok();
                     Err(error)
+                }
+            }
+        }
+    }
+}
+
+/// How often a request checks whether the user is back.
+const RECHECK: Duration = Duration::from_secs(3);
+
+/// The end of a wait for an answer.
+#[derive(Debug, PartialEq)]
+enum Wait<T> {
+    Done(T),
+    TimedOut,
+    /// The user came back to the computer before the answer.
+    Back,
+}
+
+/// Wait up to `limit` for `answer`. With `here`, stop when it says that the
+/// user is back, checked each `every`.
+async fn wait_away<T>(
+    answer: impl std::future::Future<Output = T>,
+    limit: Duration,
+    here: Option<impl Fn() -> bool>,
+    every: Duration,
+) -> Wait<T> {
+    let deadline = tokio::time::sleep(limit);
+    tokio::pin!(answer, deadline);
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    loop {
+        tokio::select! {
+            value = &mut answer => return Wait::Done(value),
+            () = &mut deadline => return Wait::TimedOut,
+            _ = ticks.tick(), if here.is_some() => {
+                if here.as_ref().is_some_and(|here| here()) {
+                    return Wait::Back;
                 }
             }
         }
@@ -325,6 +375,29 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_request_stops_waiting_when_the_user_comes_back() {
+        let every = Duration::from_millis(20);
+        let checks = std::cell::Cell::new(0);
+        let back_on_third = || {
+            checks.set(checks.get() + 1);
+            checks.get() == 3
+        };
+        let never = std::future::pending::<()>();
+        let wait = wait_away(never, Duration::from_secs(120), Some(back_on_third), every).await;
+        assert_eq!(wait, Wait::Back);
+        assert_eq!(checks.get(), 3);
+
+        let away = || false;
+        let never = std::future::pending::<()>();
+        let wait = wait_away(never, every * 5, Some(away), every).await;
+        assert_eq!(wait, Wait::TimedOut);
+
+        let none: Option<fn() -> bool> = None;
+        let answer = async { 7 };
+        assert_eq!(wait_away(answer, every, none, every).await, Wait::Done(7));
+    }
 
     #[test]
     fn activity_keeps_the_last_command_output_until_the_turn_ends() {

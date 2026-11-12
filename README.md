@@ -131,12 +131,15 @@ codex plugin add yappr@yappr
 
 The plugin acts only when you are away from the computer. You are away when you
 lock the screen, or after 2 minutes with no keyboard or mouse input. At the computer, the agent
-asks in the terminal as usual, and nothing goes to your phone.
+asks in the terminal as usual, and nothing goes to your phone. If Yappr cannot tell,
+such as over SSH, it acts as if you are at the computer.
 
 When you are away, the plugin asks the device that receives this feed to approve
 permission requests. Each agent has one card per project on your phone. The card
 shows what the agent did, and the agent's last message when its turn ends.
 Without an answer in time, the agent uses its normal terminal prompt.
+If you come back to the computer first, the request on your phone stops and
+the agent asks in the terminal.
 Claude Code can show that prompt while Yappr waits.
 The plugin also gives the agent a skill to send updates and ask you questions.
 

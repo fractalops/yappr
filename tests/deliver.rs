@@ -1340,13 +1340,20 @@ async fn at_the_computer_the_hooks_stay_quiet_unless_set_to_always() {
     let (dir, _device) = cli_writer().await;
     let ask = r#"{"hook_event_name":"PermissionRequest","cwd":"/work/app","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
     let stop = r#"{"hook_event_name":"Stop","cwd":"/work/app","last_assistant_message":"Done."}"#;
-    for input in [ask, stop] {
+    // Where yappr cannot tell, such as over SSH, the user can be at the
+    // terminal too.
+    for (input, presence) in [
+        (ask, "here"),
+        (stop, "here"),
+        (ask, "unknown"),
+        (stop, "unknown"),
+    ] {
         let out = plugin_hook(
             dir.path(),
             "claude",
             "Stop",
             input,
-            &[("YAPPR_PRESENCE", "here")],
+            &[("YAPPR_PRESENCE", presence)],
         )
         .await;
         assert!(

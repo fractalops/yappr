@@ -255,7 +255,8 @@ By default, the hooks act only when you are away: the screen is locked, or there
 At the computer, a hook gives no decision and posts nothing, so the agent asks in the terminal.
 On macOS, Yappr reads the idle time and the lock state from `ioreg`. On Linux, it reads `LockedHint` and `IdleHint` of the graphical session from `loginctl`.
 `IdleHint` uses the idle time of the desktop, which can be longer than 2 minutes.
-Without a graphical session, such as over SSH, and on Windows, the hooks act for every selected event.
+Without a graphical session, such as over SSH, and on Windows, Yappr cannot tell. The hooks then act as at the computer.
+While a request waits for an answer, Yappr checks every 3 seconds whether you are back. If you are, it cancels the request and gives no decision, so the agent asks in the terminal.
 `--hook-when always` makes the hooks act at the computer too.
 
 `--hook-to DEVICE` selects the device that answers. Without it, the hook asks the one device that receives the feed.

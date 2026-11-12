@@ -12,16 +12,18 @@ pub(super) enum Presence {
     Here,
     /// The screen is locked, or there was no input for [`IDLE_AWAY`].
     Away,
-    /// No local session to measure, such as over SSH or in CI.
+    /// No local session to measure, such as over SSH or in CI. The hooks
+    /// stay quiet, as the user can be at the terminal.
     Unknown,
 }
 
-/// The presence of the user. YAPPR_PRESENCE=here|away replaces the
+/// The presence of the user. YAPPR_PRESENCE=here|away|unknown replaces the
 /// measurement, for tests.
 pub(super) fn presence() -> Presence {
     match std::env::var("YAPPR_PRESENCE").as_deref() {
         Ok("here") => return Presence::Here,
         Ok("away") => return Presence::Away,
+        Ok("unknown") => return Presence::Unknown,
         _ => {}
     }
     measure()

@@ -330,11 +330,17 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
     }
     let subject = subject_of(agent, input.cwd.as_deref());
     let name = agent.title();
+    // The project in titles, so that cards of two projects differ when
+    // they are collapsed.
+    let place = match subject.split_once('/') {
+        Some((_, project)) => format!(" in {project}"),
+        None => String::new(),
+    };
     let tool = input.tool_name.as_deref().unwrap_or("a tool");
     match event {
         Event::PermissionRequest | Event::PreToolUse => Action::Ask {
             event,
-            title: one_line(&format!("{name} asks to use {tool}"), MAX_TITLE),
+            title: one_line(&format!("{name} asks to use {tool}{place}"), MAX_TITLE),
             body: text(&describe(input.tool_input.as_ref())),
             subject,
         },
@@ -372,7 +378,7 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
                 )
             });
             Action::Activity {
-                title: format!("{name} is working"),
+                title: format!("{name} is working{place}"),
                 step: Some(step),
                 detail,
                 subject,
@@ -380,15 +386,15 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
         }
         Event::Notification => Action::Post {
             kind: format!("{}.notification", agent.name()),
-            title: format!("{name} needs your input"),
+            title: format!("{name} needs your input{place}"),
             body: text(input.message.as_deref().unwrap_or_default()),
             subject,
         },
         Event::Stop | Event::SubagentStop => Action::Activity {
             title: if event == Event::Stop {
-                format!("{name} finished")
+                format!("{name} finished{place}")
             } else {
-                format!("{name}: a subagent finished")
+                format!("{name}: a subagent finished{place}")
             },
             step: None,
             detail: Some(text(
@@ -674,7 +680,7 @@ mod tests {
             panic!("{action:?}")
         };
         assert_eq!(event, Event::PermissionRequest);
-        assert_eq!(title, "Claude asks to use Bash");
+        assert_eq!(title, "Claude asks to use Bash in my-project");
         assert_eq!(body, "rm -rf build/\u{fffd}[2J");
         assert_eq!(subject, "claude/my-project");
     }
@@ -918,7 +924,7 @@ mod tests {
             else {
                 panic!("{action:?}")
             };
-            assert_eq!(title, format!("{} is working", agent.title()));
+            assert_eq!(title, format!("{} is working in app", agent.title()));
             assert_eq!(actual_step, step);
             let detail = detail.expect("command result");
             assert!(detail.contains(result), "{detail}");

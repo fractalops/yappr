@@ -1030,7 +1030,7 @@ async fn plugin_options_replace_the_saved_settings_and_empty_options_keep_them()
     let entries = Store::open(dir.path()).unwrap().entries().unwrap();
     assert_eq!(
         entries.last().unwrap().title.as_deref(),
-        Some("Claude: a subagent finished")
+        Some("Claude: a subagent finished in app")
     );
     let out = plugin_hook(
         dir.path(),
@@ -1239,7 +1239,10 @@ async fn a_permission_request_waits_for_the_device_and_returns_its_decision() {
             .await
         });
         let entry = device.wait_for(n * 2 - 1).await.remove(n * 2 - 2);
-        assert_eq!(entry.title.as_deref(), Some("Claude asks to use Bash"));
+        assert_eq!(
+            entry.title.as_deref(),
+            Some("Claude asks to use Bash in app")
+        );
         assert_eq!(entry.body, "rm -rf build");
         assert_eq!(entry.subject.as_deref(), Some("claude/app"));
         let question = choices::question(&entry).unwrap();
@@ -1283,7 +1286,7 @@ async fn other_events_post_and_failures_never_block_the_agent() {
     let entry = device.wait_for(1).await.remove(0);
     assert_eq!(
         (entry.kind.as_str(), entry.title.as_deref()),
-        ("state", Some("Codex finished"))
+        ("state", Some("Codex finished in app"))
     );
     assert_eq!(entry.body, "All tests pass.");
 
@@ -1418,7 +1421,11 @@ async fn tool_steps_collect_on_one_card_until_the_turn_ends() {
             card.subject.as_deref(),
             card.title.as_deref()
         ),
-        ("state", Some("claude/app"), Some("Claude is working"))
+        (
+            "state",
+            Some("claude/app"),
+            Some("Claude is working in app")
+        )
     );
     assert_eq!(card.format.as_deref(), Some("markdown"));
     let steps: Vec<&str> = card
@@ -1452,7 +1459,7 @@ async fn tool_steps_collect_on_one_card_until_the_turn_ends() {
     let entries = Store::open(dir.path()).unwrap().entries().unwrap();
     assert_eq!(
         (entries[8].title.as_deref(), entries[8].body.as_str()),
-        (Some("Claude finished"), "All done.")
+        (Some("Claude finished in app"), "All done.")
     );
     assert_eq!(entries[9].body, "- `Bash` · `next`");
 }

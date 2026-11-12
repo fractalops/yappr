@@ -292,7 +292,7 @@ A shared server can use a different environment or version from the CLI.
 | `notification` | `Notification`, Claude Code only | Posts `claude.notification`. It repeats permission requests and stops |
 
 The activity card is a `state` entry with the subject `AGENT/PROJECT`, such as `claude/yappr`. PROJECT is the name of the working directory.
-The app shows only the newest `state` entry of a subject, so each agent has one card per project.
+The app shows only the newest `state` entry of a subject, so each agent has one card per project. The titles name the project, such as "Claude finished in yappr".
 The card lists the last 5 steps: the tool and its main argument, such as the command or a path in the project.
 Below the steps, it shows the stdout and stderr of the last command, up to 2 KiB. It does not show other results, such as the content of a file that the tool read.
 If a shell command prints a file, the output can include the content of that file.

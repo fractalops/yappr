@@ -1,0 +1,54 @@
+{
+  "name": "yappr-hooks",
+  "version": "0.1.8",
+  "description": "Experimental. Sends agent permission requests to your phone while you are away from the computer.",
+  "author": {
+    "name": "fractalops"
+  },
+  "repository": "https://github.com/fractalops/yappr",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "approvals",
+    "hooks",
+    "phone",
+    "experimental"
+  ],
+  "hooks": "./hooks/claude.json",
+  "userConfig": {
+    "device": {
+      "type": "string",
+      "title": "Device",
+      "description": "The device that answers approvals. Empty: yappr config --hook-to, or the one device that receives the feed.",
+      "required": false,
+      "default": ""
+    },
+    "timeout": {
+      "type": "string",
+      "title": "Approval wait",
+      "description": "How long an approval waits, such as 5m. At most 59m. Empty: yappr config --hook-timeout, or 2m.",
+      "required": false,
+      "default": ""
+    },
+    "events": {
+      "type": "string",
+      "title": "Events",
+      "description": "Events such as permission,stop,pretooluse:Bash:git push*. Empty: yappr config --hook-events, or permission,stop.",
+      "required": false,
+      "default": ""
+    },
+    "when": {
+      "type": "string",
+      "title": "When",
+      "description": "away: act only when the screen is locked or the computer was idle for 2 minutes. always: act on every selected event. Empty: yappr config --hook-when, or away.",
+      "required": false,
+      "default": ""
+    },
+    "feed": {
+      "type": "string",
+      "title": "Feed",
+      "description": "The local feed name. Empty: default.",
+      "required": false,
+      "default": ""
+    }
+  }
+}

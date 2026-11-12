@@ -1,72 +1,31 @@
-//! Agent hook installation and execution.
+//! Agent hook execution. The agent plugins run `yappr hook` for each event.
 
 use std::{
     io::{self, Read},
-    path::PathBuf,
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
 use jiff::Timestamp;
-use tokio::time::timeout;
 use yappr::{
     choices::{self, QuestionStatus},
+    config::{FeedConfig, HookSettings, HookWhen},
     entry::{self, Draft},
+    hooks::{self as agent_hooks, Selected},
     peers,
     store::Store,
 };
 
 use super::{
-    args::{CommonArgs, HookArgs, HookScope, HooksCommand},
+    args::{parse_interval, CommonArgs, HookArgs},
+    presence::{self, Presence},
     questions::final_state,
     shown,
     writer::deliver_now,
     Usage,
 };
 
-/// The settings file of `agent` for `scope`. CLAUDE_CONFIG_DIR and
-/// CODEX_HOME move the user settings, as they do for the agents.
-fn hook_settings(agent: yappr::hooks::Agent, scope: HookScope) -> Result<PathBuf> {
-    use yappr::hooks::Agent;
-    let home = || dirs::home_dir().context("cannot find the home directory");
-    let env_dir = |var: &str| std::env::var_os(var).map(PathBuf::from);
-    Ok(match (agent, scope) {
-        (Agent::Claude, HookScope::User) => env_dir("CLAUDE_CONFIG_DIR")
-            .map_or_else(|| home().map(|h| h.join(".claude")), Ok)?
-            .join("settings.json"),
-        (Agent::Claude, HookScope::Project) => PathBuf::from(".claude/settings.json"),
-        (Agent::Claude, HookScope::Local) => PathBuf::from(".claude/settings.local.json"),
-        (Agent::Codex, HookScope::User) => env_dir("CODEX_HOME")
-            .map_or_else(|| home().map(|h| h.join(".codex")), Ok)?
-            .join("hooks.json"),
-        (Agent::Codex, HookScope::Project) => PathBuf::from(".codex/hooks.json"),
-        (Agent::Codex, HookScope::Local) => {
-            return Err(
-                Usage("Codex has no local settings. Use --scope user or project".into()).into(),
-            )
-        }
-    })
-}
-
-/// The settings at `path`, or an empty object if the file does not exist.
-fn read_settings(path: &std::path::Path) -> Result<serde_json::Value> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .with_context(|| format!("{} is not valid JSON. Fix it first", path.display())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(serde_json::json!({})),
-        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
-    }
-}
-
-fn write_settings(path: &std::path::Path, settings: &serde_json::Value) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut text = serde_json::to_string_pretty(settings)?;
-    text.push('\n');
-    std::fs::write(path, text).with_context(|| format!("write {}", path.display()))
-}
-
-/// The device that answers when an install names none: the one allowed
+/// The device that answers when the settings name none: the one allowed
 /// device that receives this feed, or else the one allowed device.
 fn default_device(store: &Store) -> Result<String> {
     let allowed = store.allow_list().load()?;
@@ -89,122 +48,10 @@ fn default_device(store: &Store) -> Result<String> {
         _ => {
             let names: Vec<&str> = peers.iter().map(|(alias, _)| alias.as_str()).collect();
             Err(Usage(format!(
-                "several devices can answer: {}. Choose one with --to",
+                "several devices can answer: {}. Choose one with: yappr config --hook-to DEVICE",
                 names.join(", ")
             ))
             .into())
-        }
-    }
-}
-
-pub(super) fn hooks_command(common: &CommonArgs, command: HooksCommand) -> Result<()> {
-    use yappr::hooks::{self, Agent};
-    match command {
-        HooksCommand::Install {
-            agent,
-            to,
-            events,
-            scope,
-            timeout,
-        } => {
-            let path = hook_settings(agent, scope)?;
-            let events = match events {
-                Some(text) => {
-                    hooks::parse_events(agent, &text).map_err(|e| Usage(format!("{e:#}")))?
-                }
-                None => hooks::default_events(agent),
-            };
-            let store = common.store()?;
-            let device = match to {
-                Some(device) => device,
-                None => default_device(&store)?,
-            };
-            let id = peers::resolve(store.dir(), &device)?.id;
-            if !store.allow_list().contains(&id) {
-                bail!("{device} cannot answer yet. Allow it first: yappr allow {device}");
-            }
-            let program = std::env::current_exe()?.to_string_lossy().into_owned();
-            let dir = std::fs::canonicalize(store.dir())?
-                .to_string_lossy()
-                .into_owned();
-            let secs = timeout.as_secs().max(1);
-            let mut settings = read_settings(&path)?;
-            if path.exists() {
-                let backup = path.with_file_name(format!(
-                    "{}.yappr-backup",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                ));
-                std::fs::copy(&path, &backup)?;
-            }
-            hooks::install(
-                &mut settings,
-                &events,
-                |_| hooks::command(&program, &dir, agent, Some(&device), secs),
-                secs,
-            )?;
-            write_settings(&path, &settings)?;
-            eprintln!("Added yappr hooks to {}:", path.display());
-            for selected in &events {
-                let what = if selected.event.asks() {
-                    format!("ask {device}, then allow or deny")
-                } else {
-                    "post an entry".into()
-                };
-                let matcher = selected
-                    .matcher
-                    .as_deref()
-                    .map(|m| format!(" ({m})"))
-                    .unwrap_or_default();
-                let commands = if selected.commands.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", selected.commands.join(" or "))
-                };
-                eprintln!("  {}{matcher}{commands}: {what}", selected.event.key());
-            }
-            if agent == Agent::Codex {
-                eprintln!("In Codex, run /hooks once and trust the yappr hooks.");
-            }
-            eprintln!("To remove them: yappr hooks remove {agent}");
-            Ok(())
-        }
-        HooksCommand::Status { agent } => {
-            let agents = agent.map_or(vec![Agent::Claude, Agent::Codex], |a| vec![a]);
-            let mut found = false;
-            for agent in agents {
-                for scope in [HookScope::User, HookScope::Project, HookScope::Local] {
-                    let Ok(path) = hook_settings(agent, scope) else {
-                        continue;
-                    };
-                    let Ok(settings) = read_settings(&path) else {
-                        continue;
-                    };
-                    let installed = hooks::installed(&settings);
-                    if installed.is_empty() {
-                        continue;
-                    }
-                    found = true;
-                    println!("{agent} ({}):", path.display());
-                    for (event, command) in installed {
-                        println!("  {event}: {command}");
-                    }
-                }
-            }
-            if !found {
-                eprintln!("No yappr hooks are installed. Run \"yappr hooks install claude\" or \"yappr hooks install codex\".");
-            }
-            Ok(())
-        }
-        HooksCommand::Remove { agent, scope } => {
-            let path = hook_settings(agent, scope)?;
-            let mut settings = read_settings(&path)?;
-            if hooks::remove(&mut settings) {
-                write_settings(&path, &settings)?;
-                eprintln!("Removed the yappr hooks from {}.", path.display());
-            } else {
-                eprintln!("{} has no yappr hooks.", path.display());
-            }
-            Ok(())
         }
     }
 }
@@ -254,15 +101,16 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
         .context("read the hook event")?;
     let input: hooks::Input =
         serde_json::from_str(&text).context("the hook event is not valid JSON")?;
-    let action = match args.events {
-        Some(events) => hooks::plan_selected(
-            args.agent,
-            &input,
-            &hooks::parse_events(args.agent, &events)?,
-        ),
-        None => hooks::plan(args.agent, &input),
-    };
+    let saved = FeedConfig::load(&common.dir()?)?.hooks;
+    let settings = Settings::resolve(&args, &saved)?;
+    let action = hooks::plan_selected(args.agent, &input, &settings.events);
     if action == Action::Nothing {
+        return Ok(None);
+    }
+    // Where yappr cannot tell, such as over SSH, the user can be at the
+    // terminal. Act only when the user is surely away.
+    let watch = settings.when == HookWhen::Away;
+    if watch && presence::presence() != Presence::Away {
         return Ok(None);
     }
     let store = common.store()?;
@@ -278,7 +126,7 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                 source: args.agent.name().into(),
                 kind,
                 level: None,
-                subject,
+                subject: Some(subject),
                 title: Some(title),
                 body,
                 format: None,
@@ -290,21 +138,33 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
             deliver_later(&store, args.agent, entry.id)?;
             Ok(None)
         }
+        Action::Activity {
+            title,
+            step,
+            detail,
+            subject,
+        } => {
+            let entry =
+                store.append(activity(&store, args.agent, title, step, detail, subject)?)?;
+            deliver_later(&store, args.agent, entry.id)?;
+            Ok(None)
+        }
         Action::Ask {
             event,
             title,
             body,
             subject,
         } => {
-            let to = args
-                .to
-                .context("no device to ask. Run: yappr hooks install")?;
+            let to = match settings.to {
+                Some(to) => to,
+                None => default_device(&store)?,
+            };
             let responder = peers::resolve(store.dir(), &to)?.id;
             if !store.allow_list().contains(&responder) {
                 bail!("{to} cannot answer. Allow it first: yappr allow {to}");
             }
             let expires_at =
-                Timestamp::now().checked_add(jiff::SignedDuration::try_from(args.timeout)?)?;
+                Timestamp::now().checked_add(jiff::SignedDuration::try_from(settings.wait)?)?;
             let question = choices::new_question(
                 title,
                 body,
@@ -315,16 +175,35 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                 true,
             );
             let details = entry::Details {
-                subject,
+                subject: Some(subject),
                 ..Default::default()
             };
             let question = choices::create_with(&store, question, details)?;
             // The question expires at the deadline, and a decision cannot
             // arrive after it. Read the state once more, in case a decision
             // reached disk at the deadline.
-            let state = match timeout(args.timeout, final_state(common, &question.id)).await {
-                Ok(state) => state,
-                Err(_) => store
+            let answer = final_state(common, &question.id);
+            let state = match wait_away(
+                answer,
+                settings.wait,
+                watch.then_some(presence::presence),
+                RECHECK,
+            )
+            .await
+            {
+                Wait::Done(state) => state,
+                // Stop the request on the device. The agent can ask in the
+                // terminal.
+                Wait::Back => {
+                    choices::cancel(&store, &question.id).ok();
+                    deliver_later(
+                        &store,
+                        args.agent,
+                        store.entries()?.last().map_or(0, |e| e.id),
+                    )?;
+                    return Ok(None);
+                }
+                Wait::TimedOut => store
                     .entries()
                     .and_then(|entries| choices::get(&entries, &question.id)),
             };
@@ -340,5 +219,248 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                 }
             }
         }
+    }
+}
+
+/// How often a request checks whether the user is back.
+const RECHECK: Duration = Duration::from_secs(3);
+
+/// The end of a wait for an answer.
+#[derive(Debug, PartialEq)]
+enum Wait<T> {
+    Done(T),
+    TimedOut,
+    /// The check no longer confirms that the user is away.
+    Back,
+}
+
+/// Wait up to `limit` for `answer`. If presence checks are enabled, stop
+/// when a check no longer confirms that the user is away.
+async fn wait_away<T>(
+    answer: impl std::future::Future<Output = T>,
+    limit: Duration,
+    presence: Option<impl Fn() -> Presence>,
+    every: Duration,
+) -> Wait<T> {
+    let deadline = tokio::time::sleep(limit);
+    tokio::pin!(answer, deadline);
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    loop {
+        tokio::select! {
+            value = &mut answer => return Wait::Done(value),
+            () = &mut deadline => return Wait::TimedOut,
+            _ = ticks.tick(), if presence.is_some() => {
+                if presence.as_ref().is_some_and(|check| check() != Presence::Away) {
+                    return Wait::Back;
+                }
+            }
+        }
+    }
+}
+
+/// The most recent steps on an activity card.
+const STEPS: usize = 5;
+
+/// The next activity card of `agent` for `subject`. A step adds to the steps
+/// of the last card, and a card without a step starts again.
+fn activity(
+    store: &Store,
+    agent: agent_hooks::Agent,
+    title: String,
+    step: Option<String>,
+    detail: Option<String>,
+    subject: String,
+) -> Result<Draft> {
+    let mut steps: Vec<serde_json::Value> = Vec::new();
+    let mut data = serde_json::Map::new();
+    let detail = if let Some(step) = step {
+        let last = store.entries()?.into_iter().rev().find(|e| {
+            e.kind == "state" && e.source == agent.name() && e.subject.as_deref() == Some(&subject)
+        });
+        let last = last.as_ref().and_then(|e| e.extra.get("activity"));
+        if let Some(serde_json::Value::Array(old)) = last.and_then(|d| d.get("steps")) {
+            steps.clone_from(old);
+        }
+        steps.push(step.into());
+        let extra = steps.len().saturating_sub(STEPS);
+        steps.drain(..extra);
+        let result = detail.or_else(|| {
+            last.and_then(|d| d.get("command_result"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+        if let Some(result) = result.as_ref().filter(|s| !s.is_empty()) {
+            data.insert("command_result".into(), result.clone().into());
+        }
+        result
+    } else {
+        detail
+    };
+    let mut body = steps
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|s| format!("- {s}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(detail) = detail.filter(|s| !s.is_empty()) {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&detail);
+    }
+    data.insert("steps".into(), steps.into());
+    Ok(Draft {
+        source: agent.name().into(),
+        kind: "state".into(),
+        level: None,
+        subject: Some(subject),
+        title: Some(title),
+        body,
+        format: Some("markdown".into()),
+        data: None,
+        extra: [("activity".into(), data.into())].into_iter().collect(),
+    })
+}
+
+/// The hook settings of one run. A flag comes first, then the environment
+/// that the plugin sets, then `yappr config`.
+struct Settings {
+    when: HookWhen,
+    to: Option<String>,
+    wait: Duration,
+    events: Vec<Selected>,
+}
+
+/// The value of an environment variable, with an empty value as unset. The
+/// plugins pass unset options as empty values.
+fn env_setting(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+impl Settings {
+    fn resolve(args: &HookArgs, saved: &HookSettings) -> Result<Self> {
+        let to = args
+            .to
+            .clone()
+            .or_else(|| env_setting("YAPPR_HOOK_TO"))
+            .or_else(|| saved.to.clone());
+        let wait = match (args.timeout, env_setting("YAPPR_HOOK_TIMEOUT")) {
+            (Some(wait), _) => wait,
+            (None, Some(text)) => {
+                parse_interval(&text).map_err(|e| anyhow::anyhow!("YAPPR_HOOK_TIMEOUT: {e}"))?
+            }
+            (None, None) => saved
+                .timeout
+                .map_or(agent_hooks::DEFAULT_WAIT, Duration::from_secs),
+        };
+        let events = match args
+            .events
+            .clone()
+            .or_else(|| env_setting("YAPPR_HOOK_EVENTS"))
+            .or_else(|| saved.events.clone())
+        {
+            Some(text) => agent_hooks::parse_events(&text)?,
+            None => agent_hooks::default_events(),
+        };
+        let when = match env_setting("YAPPR_HOOK_WHEN") {
+            Some(text) => <HookWhen as clap::ValueEnum>::from_str(&text, true)
+                .map_err(|_| anyhow::anyhow!("YAPPR_HOOK_WHEN: use away or always"))?,
+            None => saved.when.unwrap_or_default(),
+        };
+        Ok(Self {
+            when,
+            to,
+            wait: wait.min(agent_hooks::MAX_WAIT),
+            events,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_request_stops_waiting_when_the_user_comes_back() {
+        let every = Duration::from_millis(20);
+        let checks = std::cell::Cell::new(0);
+        let back_on_third = || {
+            checks.set(checks.get() + 1);
+            if checks.get() == 3 {
+                Presence::Here
+            } else {
+                Presence::Away
+            }
+        };
+        let never = std::future::pending::<()>();
+        let wait = wait_away(never, Duration::from_secs(120), Some(back_on_third), every).await;
+        assert_eq!(wait, Wait::Back);
+        assert_eq!(checks.get(), 3);
+
+        let away = || Presence::Away;
+        let never = std::future::pending::<()>();
+        let wait = wait_away(never, every * 5, Some(away), every).await;
+        assert_eq!(wait, Wait::TimedOut);
+
+        let none: Option<fn() -> Presence> = None;
+        let answer = async { 7 };
+        assert_eq!(wait_away(answer, every, none, every).await, Wait::Done(7));
+    }
+
+    #[tokio::test]
+    async fn a_request_stops_waiting_if_presence_becomes_unknown() {
+        let every = Duration::from_millis(20);
+        let checks = std::cell::Cell::new(0);
+        let presence = || {
+            checks.set(checks.get() + 1);
+            if checks.get() == 1 {
+                Presence::Away
+            } else {
+                Presence::Unknown
+            }
+        };
+        let never = std::future::pending::<()>();
+        let wait = wait_away(never, Duration::from_secs(1), Some(presence), every).await;
+        assert_eq!(wait, Wait::Back);
+        assert_eq!(checks.get(), 2);
+    }
+
+    #[test]
+    fn activity_keeps_the_last_command_output_until_the_turn_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let add = |step: Option<&str>, detail: Option<&str>| {
+            let draft = activity(
+                &store,
+                agent_hooks::Agent::Claude,
+                "Claude activity".into(),
+                step.map(str::to_owned),
+                detail.map(str::to_owned),
+                "claude/project".into(),
+            )
+            .unwrap();
+            store.append(draft).unwrap()
+        };
+
+        add(Some("command"), Some("Last result:\n```\nOutput\n```"));
+        for step in ["file a", "file b", "file c", "file d"] {
+            add(Some(step), None);
+        }
+        let entry = add(Some("file e"), None);
+        assert!(entry.data.is_none());
+        assert_eq!(
+            entry.extra["activity"]["steps"].as_array().unwrap().len(),
+            5
+        );
+        assert_eq!(
+            entry.body,
+            "- file a\n- file b\n- file c\n- file d\n- file e\n\nLast result:\n```\nOutput\n```"
+        );
+        let entry = add(Some("quiet command"), Some(""));
+        assert!(!entry.body.contains("Last result"));
+        assert_eq!(add(None, Some("Done.")).body, "Done.");
+        assert_eq!(add(Some("next turn"), None).body, "- next turn");
     }
 }

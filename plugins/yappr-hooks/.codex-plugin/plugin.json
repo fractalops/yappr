@@ -1,0 +1,17 @@
+{
+  "name": "yappr-hooks",
+  "version": "0.1.8",
+  "description": "Experimental. Sends agent permission requests to your phone while you are away from the computer.",
+  "author": {
+    "name": "fractalops"
+  },
+  "repository": "https://github.com/fractalops/yappr",
+  "license": "MIT OR Apache-2.0",
+  "hooks": "./hooks/codex.json",
+  "interface": {
+    "displayName": "yappr hooks (experimental)",
+    "shortDescription": "Experimental: agent approvals on your phone",
+    "developerName": "fractalops",
+    "category": "Developer Tools"
+  }
+}

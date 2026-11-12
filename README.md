@@ -108,48 +108,27 @@ question expires, you cancel it, or an error occurs.
 
 ## Coding agents
 
-Yappr sends updates and approval requests from Claude Code and Codex to your phone.
+The yappr plugin teaches Claude Code and Codex to use `yappr post`, `yappr ask`, and `yappr approve`.
 
 ```sh
-# Install approval and turn-end hooks
-yappr hooks install claude
-yappr hooks install codex
+# Claude Code
+claude plugin marketplace add fractalops/yappr
+claude plugin install yappr@yappr
 
-# Ask before pushing and send test results
-yappr hooks install claude \
-  --events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
-
-# Include subagent and session updates for this project
-yappr hooks install codex --scope project --events permission,stop,subagent,session
-
-# Remove Yappr hooks
-yappr hooks remove claude
-yappr hooks remove codex
+# Codex
+codex plugin marketplace add fractalops/yappr
+codex plugin add yappr@yappr
 ```
 
-The default events are `permission,stop`. `--events` replaces this selection.
+Experimental: [agent hooks](docs/hooks-reference.md) let you approve or reject the agent's permission requests from your other device, and show when it finishes. They act only while you are away from the computer.
 
-> [!TIP]
-> `--events` accepts `event[:matcher[:command-pattern]]` entries.
-> Patterns use `*` for any text and `?` for one character. Repeat an event with
-> different patterns to match any of them. See [command filters](docs/reference.md#command-filters) for details.
+```sh
+# Claude Code
+claude plugin install yappr-hooks@yappr
 
-> [!TIP]
-> Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
-> trust the yappr hooks.
-
-Hook support in Yappr: ☑ supported, ☐ unsupported.
-
-| Hook | Agent | What Yappr does |
-|---|---|---|
-| ☑ `PermissionRequest` | Claude Code, Codex | Shows an approval request on your phone and returns your decision to the agent |
-| ☑ `Stop` | Claude Code, Codex | Sends the agent's last message when its turn ends |
-| ☑ `PreToolUse` | Claude Code, Codex | Asks for approval before each matching tool runs |
-| ☑ `Notification` | Claude Code | Sends the agent's notification message to your phone |
-| ☑ `SubagentStop` | Claude Code, Codex | Sends an update when a subagent finishes |
-| ☑ `SessionStart`, `SessionEnd` | Claude Code, Codex | Sends an update when a session starts or ends |
-| ☑ `PostToolUse` | Claude Code, Codex | Sends a completion update with the tool name and a result summary |
-| ☑ `PostToolUseFailure` | Claude Code | Sends an update with the tool name and error when a tool fails |
+# Codex, then trust the hooks in /hooks
+codex plugin add yappr-hooks@yappr
+```
 
 ## Reference
 

@@ -745,6 +745,7 @@ async fn yappr_hook(
         .args(args)
         .env("YAPPR_DIR", dir)
         .env("YAPPR_NETWORK", "local")
+        .env("YAPPR_PRESENCE", "away")
         .env("CLAUDE_CONFIG_DIR", home.join("claude"))
         .env("CODEX_HOME", home.join("codex"))
         .env_remove("IROH_SECRET")
@@ -760,29 +761,61 @@ async fn yappr_hook(
     child.wait_with_output().await.unwrap()
 }
 
-/// Run the exact command written to the agent's settings, with its stdin.
+/// The plugin with the agent hooks.
+const HOOKS_PLUGIN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/yappr-hooks");
+
+/// The handler of `event` in the plugin hook file of `agent`.
+fn plugin_handler(agent: &str, event: &str) -> serde_json::Value {
+    let path = std::path::Path::new(HOOKS_PLUGIN).join(format!("hooks/{agent}.json"));
+    let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    hooks["hooks"][event][0]["hooks"][0].clone()
+}
+
+/// Run the plugin hook of `agent` for `event` as the agent runs it, with the
+/// built binary as yappr and `env` added.
 #[cfg(unix)]
-async fn configured_hook(
+async fn plugin_hook(
     dir: &std::path::Path,
-    home: &std::path::Path,
-    command: &str,
+    agent: &str,
+    event: &str,
     stdin: &str,
+    env: &[(&str, &str)],
 ) -> std::process::Output {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new("sh")
-        .args(["-c", command])
-        .current_dir(home)
+    let root = HOOKS_PLUGIN;
+    let handler = plugin_handler(agent, event);
+    let command = handler["command"].as_str().unwrap();
+    let mut process = match handler.get("args") {
+        // Claude Code runs the exec form without a shell.
+        Some(args) => {
+            let mut process = tokio::process::Command::new(command);
+            for arg in args.as_array().unwrap() {
+                process.arg(arg.as_str().unwrap().replace("${CLAUDE_PLUGIN_ROOT}", root));
+            }
+            process
+        }
+        // Codex runs the command with a shell.
+        None => {
+            let mut process = tokio::process::Command::new("sh");
+            process.args(["-c", command]);
+            process
+        }
+    };
+    process
+        .env("CLAUDE_PLUGIN_ROOT", root)
+        .env("PLUGIN_ROOT", root)
+        .env("YAPPR_BIN", env!("CARGO_BIN_EXE_yappr"))
         .env("YAPPR_DIR", dir)
         .env("YAPPR_NETWORK", "local")
-        .env("CLAUDE_CONFIG_DIR", home.join("claude"))
-        .env("CODEX_HOME", home.join("codex"))
+        .env("YAPPR_PRESENCE", "away")
+        .env_remove("YAPPR_FEED")
         .env_remove("IROH_SECRET")
         .env_remove("YAPPR_KEY")
+        .envs(env.iter().copied())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(std::process::Stdio::piped());
+    let mut child = process.spawn().unwrap();
     child
         .stdin
         .take()
@@ -835,7 +868,8 @@ async fn filtered_hooks_skip_unmatched_commands_and_post_results_for_both_agents
         assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
         let entries = Store::open(dir.path()).unwrap().entries().unwrap();
         let entry = entries.last().unwrap();
-        assert_eq!(entry.kind, format!("{agent}.tool"));
+        assert_eq!(entry.kind, "state");
+        assert_eq!(entry.subject.as_deref(), Some(agent));
         assert!(entry.body.contains("cargo test --release"));
         assert!(entry.body.contains(if agent == "claude" {
             "2 passed"
@@ -861,68 +895,53 @@ async fn filtered_hooks_skip_unmatched_commands_and_post_results_for_both_agents
     assert!(out.stdout.is_empty() && out.stderr.is_empty());
     let entries = Store::open(dir.path()).unwrap().entries().unwrap();
     assert_eq!(entries.len(), 3);
-    assert_eq!(entries[2].kind, "claude.tool_failure");
+    assert_eq!(entries[2].kind, "state");
+    // The failure is the second step on the card of Claude.
+    assert!(entries[2]
+        .body
+        .starts_with("- `Bash` · `cargo test --release`\n- `Bash` failed · `cargo test`"));
     assert!(entries[2].body.contains("Exit code 1: test failed"));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn installed_command_filters_deliver_results_and_keep_pretool_approvals() {
+async fn configured_command_filters_deliver_results_and_keep_pretool_approvals() {
     let (dir, mut device) = cli_writer().await;
     let home = tempfile::tempdir().unwrap();
     let events = "permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*,posttooluse:Bash:*test*";
-    let installed = yappr_hook(
+    let saved = yappr_hook(
         dir.path(),
         home.path(),
-        &[
-            "hooks",
-            "install",
-            "claude",
-            "--events",
-            events,
-            "--timeout",
-            "5s",
-        ],
+        &["config", "--hook-events", events, "--hook-timeout", "5s"],
         "",
     )
     .await;
-    assert!(installed.status.success(), "{installed:?}");
-    let settings: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.path().join("claude/settings.json")).unwrap())
-            .unwrap();
-    let settings_path = home.path().join("claude/settings.json");
-    let original = std::fs::read(&settings_path).unwrap();
+    assert!(saved.status.success(), "{saved:?}");
+    let config_path = dir.path().join("config.json");
+    let original = std::fs::read(&config_path).unwrap();
     for events in [
         "permission:Bash:git *",
         "posttooluse:Bash:cargo test*,posttooluse:Bash|Read:*test*",
         "pretooluse:Bash:git push*,pretooluse:Bash|Read:git *",
+        "permission:(Bash",
     ] {
         let invalid = yappr_hook(
             dir.path(),
             home.path(),
-            &["hooks", "install", "claude", "--events", events],
+            &["config", "--hook-events", events],
             "",
         )
         .await;
         assert_eq!(invalid.status.code(), Some(2), "{invalid:?}");
-        assert_eq!(std::fs::read(&settings_path).unwrap(), original);
+        assert_eq!(std::fs::read(&config_path).unwrap(), original);
     }
-    assert_eq!(
-        settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
-        1
-    );
-    let post = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap();
-    let pre = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap();
-    for (handler, event_name, command) in [
-        (post, "PostToolUse", "cargo fmt"),
-        (pre, "PreToolUse", "git status"),
+    for (event, tool, command) in [
+        ("PostToolUse", "Bash", "cargo fmt"),
+        ("PreToolUse", "Bash", "git status"),
+        ("PostToolUse", "Read", "cargo test"),
     ] {
-        let event = serde_json::json!({"hook_event_name": event_name, "tool_name": "Bash", "tool_input": {"command": command}}).to_string();
-        let out = configured_hook(dir.path(), home.path(), handler, &event).await;
+        let input = serde_json::json!({"hook_event_name": event, "tool_name": tool, "tool_input": {"command": command}}).to_string();
+        let out = plugin_hook(dir.path(), "claude", event, &input, &[]).await;
         assert!(
             out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
             "{out:?}"
@@ -930,8 +949,8 @@ async fn installed_command_filters_deliver_results_and_keep_pretool_approvals() 
     }
     assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 0);
     for (n, command) in [(1, "cargo test --release"), (2, "cargo build")] {
-        let event = serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_response": {"stdout": "done"}}).to_string();
-        let out = configured_hook(dir.path(), home.path(), post, &event).await;
+        let input = serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_response": {"stdout": "done"}}).to_string();
+        let out = plugin_hook(dir.path(), "claude", "PostToolUse", &input, &[]).await;
         assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
         let entries = device.wait_for(n).await;
         assert_eq!(
@@ -939,14 +958,12 @@ async fn installed_command_filters_deliver_results_and_keep_pretool_approvals() 
             n,
             "overlapping filters sent duplicate updates"
         );
-        assert_eq!(entries[n - 1].kind, "claude.tool");
+        assert_eq!(entries[n - 1].kind, "state");
         assert!(entries[n - 1].body.contains(command));
     }
     let path = dir.path().to_owned();
-    let home_path = home.path().to_owned();
-    let pre = pre.to_owned();
     let asking = tokio::spawn(async move {
-        configured_hook(&path, &home_path, &pre, r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin main"}}"#).await
+        plugin_hook(&path, "codex", "PreToolUse", r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin main"}}"#, &[]).await
     });
     let entries = device.wait_for(3).await;
     let question = choices::question(&entries[2]).unwrap();
@@ -980,138 +997,244 @@ async fn installed_command_filters_deliver_results_and_keep_pretool_approvals() 
 
 #[cfg(unix)]
 #[tokio::test]
-async fn installed_patterns_are_quoted_and_never_run_as_shell_commands() {
+async fn plugin_options_replace_the_saved_settings_and_empty_options_keep_them() {
     let (dir, _device) = cli_writer().await;
     let home = tempfile::tempdir().unwrap();
-    let marker = home.path().join("pattern-was-executed");
-    let pattern = format!("echo 'it's literal' $(touch {})", marker.display());
-    let events = format!("posttooluse:Bash:{pattern}");
     let out = yappr_hook(
         dir.path(),
         home.path(),
-        &["hooks", "install", "claude", "--events", &events],
+        &["config", "--hook-events", "stop"],
         "",
     )
     .await;
     assert!(out.status.success(), "{out:?}");
-    let settings: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.path().join("claude/settings.json")).unwrap())
-            .unwrap();
-    let handler = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap();
-    let event = serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": pattern}, "tool_response": "done"}).to_string();
-    let out = configured_hook(dir.path(), home.path(), handler, &event).await;
+    let input = r#"{"hook_event_name":"SubagentStop","cwd":"/work/app"}"#;
+    // The saved events have no subagent event.
+    let out = plugin_hook(
+        dir.path(),
+        "claude",
+        "SubagentStop",
+        input,
+        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "")],
+    )
+    .await;
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 0);
+    // The plugin option comes first.
+    let out = plugin_hook(
+        dir.path(),
+        "claude",
+        "SubagentStop",
+        input,
+        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "subagent")],
+    )
+    .await;
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    let entries = Store::open(dir.path()).unwrap().entries().unwrap();
+    assert_eq!(
+        entries.last().unwrap().title.as_deref(),
+        Some("Claude: a subagent finished in app")
+    );
+    let out = plugin_hook(
+        dir.path(),
+        "codex",
+        "SubagentStop",
+        input,
+        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "subagent")],
+    )
+    .await;
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 1);
+    // An unknown device is an error on stderr, not a decision.
+    let out = plugin_hook(
+        dir.path(),
+        "claude",
+        "PermissionRequest",
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "permission"), ("CLAUDE_PLUGIN_OPTION_DEVICE", "tablet")],
+    )
+    .await;
+    assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
     assert!(
-        out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+        String::from_utf8_lossy(&out.stderr).contains("tablet"),
         "{out:?}"
     );
-    assert!(!marker.exists(), "the pattern was executed by the shell");
-    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn hooks_install_keeps_other_hooks_and_remove_restores_the_file() {
+async fn config_saves_and_clears_the_hook_settings() {
     let (dir, _device) = cli_writer().await;
     let home = tempfile::tempdir().unwrap();
-    let settings = home.path().join("claude/settings.json");
-    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    let original = "{\n  \"model\": \"x\",\n  \"hooks\": {\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"other-tool\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
-    std::fs::write(&settings, original).unwrap();
+    let config = |args: Vec<&'static str>| {
+        let dir = dir.path().to_owned();
+        let home = home.path().to_owned();
+        async move { yappr_hook(&dir, &home, &args, "").await }
+    };
+    let out = config(vec![
+        "config",
+        "--hook-to",
+        "phone",
+        "--hook-timeout",
+        "5m",
+        "--hook-events",
+        "permission,subagent",
+        "--hook-when",
+        "Always",
+    ])
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("Agent hooks act: always"), "{text}");
+    assert!(text.contains("Agent approvals go to: phone"), "{text}");
+    assert!(text.contains("Agent approvals wait: 5m"), "{text}");
+    assert!(text.contains("Agent events: permission,subagent"), "{text}");
+    for invalid in [
+        vec!["config", "--hook-to", "tablet"],
+        vec!["config", "--hook-timeout", "2h"],
+        vec!["config", "--hook-events", "loud"],
+        vec!["config", "--hook-when", "sometimes"],
+    ] {
+        let out = config(invalid.clone()).await;
+        assert!(!out.status.success(), "{invalid:?}");
+    }
+    let out = config(vec![
+        "config",
+        "--hook-to",
+        "",
+        "--hook-timeout",
+        "",
+        "--hook-events",
+        "",
+        "--hook-when",
+        "",
+        "--output",
+        "json",
+    ])
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let saved: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(saved["hooks"], serde_json::json!({}));
+}
 
-    let out = yappr_hook(dir.path(), home.path(), &["hooks", "install", "claude"], "").await;
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("ask phone"), "{stderr}");
-    let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-    assert_eq!(
-        value["hooks"]["Stop"][0]["hooks"][0]["command"],
-        "other-tool"
-    );
-    let command = value["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
-        .as_str()
+#[test]
+fn plugin_hook_files_cover_every_event_and_outlast_the_wait() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let all = [
+        "PermissionRequest",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Notification",
+        "Stop",
+        "SubagentStop",
+    ];
+    for agent in ["claude", "codex"] {
+        let hooks: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(std::path::Path::new(HOOKS_PLUGIN).join(format!("hooks/{agent}.json")))
+                .unwrap(),
+        )
         .unwrap();
-    assert!(
-        command.contains(" hook --agent claude --to 'phone'"),
-        "{command}"
-    );
-    // The key order of the file stays.
-    assert!(
-        std::fs::read_to_string(&settings)
-            .unwrap()
-            .find("\"model\"")
-            < std::fs::read_to_string(&settings)
-                .unwrap()
-                .find("\"hooks\"")
-    );
-    assert!(home
-        .path()
-        .join("claude/settings.json.yappr-backup")
-        .exists());
+        let events: Vec<&String> = hooks["hooks"].as_object().unwrap().keys().collect();
+        let expected: Vec<&str> = all
+            .iter()
+            .copied()
+            .filter(|e| agent == "claude" || !matches!(*e, "Notification" | "PostToolUseFailure"))
+            .collect();
+        assert_eq!(events, expected, "{agent}");
+        for event in expected {
+            let handler = plugin_handler(agent, event);
+            assert!(
+                hooks["hooks"][event][0].get("matcher").is_none(),
+                "{agent} {event}"
+            );
+            let wanted = match (agent, event) {
+                (_, "PermissionRequest" | "PreToolUse") => yappr::hooks::ASK_HOOK_TIMEOUT,
+                _ => 30,
+            };
+            assert_eq!(handler["timeout"], wanted, "{agent} {event}");
+            assert!(yappr::hooks::MAX_WAIT.as_secs() < yappr::hooks::ASK_HOOK_TIMEOUT);
+        }
+    }
+    // Each plugin has the version of yappr.
+    for plugin in ["yappr", "yappr-hooks"] {
+        for manifest in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"] {
+            let path = root.join("plugins").join(plugin).join(manifest);
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(json["version"], env!("CARGO_PKG_VERSION"), "{path:?}");
+        }
+    }
+    // Only yappr-hooks has hooks.
+    for agent in ["claude", "codex"] {
+        let skill = root.join("plugins/yappr");
+        assert!(!skill.join("hooks").exists());
+        let manifest = skill.join(format!(".{agent}-plugin/plugin.json"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+        assert!(json.get("hooks").is_none(), "{agent}");
+    }
+}
 
-    let status = yappr_hook(dir.path(), home.path(), &["hooks", "status"], "").await;
-    let listed = String::from_utf8(status.stdout).unwrap();
-    assert!(
-        listed.contains("PermissionRequest") && listed.contains("Stop"),
-        "{listed}"
-    );
+#[cfg(unix)]
+#[tokio::test]
+async fn the_launcher_without_yappr_gives_a_hint_and_no_decision() {
+    let empty = tempfile::tempdir().unwrap();
+    let out = tokio::process::Command::new("sh")
+        .arg(std::path::Path::new(HOOKS_PLUGIN).join("scripts/yappr-hook"))
+        .arg("claude")
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", empty.path())
+        .env_remove("CARGO_HOME")
+        .env_remove("YAPPR_BIN")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not installed"));
+}
 
-    let out = yappr_hook(dir.path(), home.path(), &["hooks", "remove", "claude"], "").await;
-    assert!(out.status.success());
-    assert_eq!(std::fs::read_to_string(&settings).unwrap(), original);
-    let status = yappr_hook(dir.path(), home.path(), &["hooks", "status", "claude"], "").await;
-    assert!(String::from_utf8(status.stderr)
-        .unwrap()
-        .contains("No yappr hooks are installed"));
-
-    let codex = yappr_hook(dir.path(), home.path(), &["hooks", "install", "codex"], "").await;
-    assert!(String::from_utf8_lossy(&codex.stderr).contains("/hooks"));
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(home.path().join("codex/hooks.json")).unwrap(),
+#[cfg(unix)]
+#[tokio::test]
+async fn the_codex_permission_hook_shows_the_install_hint() {
+    let empty = tempfile::tempdir().unwrap();
+    let out = plugin_hook(
+        empty.path(),
+        "codex",
+        "PermissionRequest",
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#,
+        &[
+            ("PATH", "/usr/bin:/bin"),
+            ("CARGO_HOME", empty.path().to_str().unwrap()),
+            ("YAPPR_BIN", ""),
+        ],
     )
-    .unwrap();
-    assert!(value["hooks"].get("Notification").is_none());
-    assert!(value["hooks"].get("PermissionRequest").is_some());
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let hint = "yappr is not installed";
+    assert!(String::from_utf8_lossy(&out.stderr).contains(hint));
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(result["systemMessage"].as_str().unwrap().contains(hint));
+    assert!(result.get("hookSpecificOutput").is_none());
 }
 
 #[tokio::test]
-async fn installed_regex_matchers_keep_their_colons() {
+async fn configured_regex_matchers_keep_their_colons() {
     let (dir, _device) = cli_writer().await;
     let home = tempfile::tempdir().unwrap();
     let events = r"permission:(?:Bash|Write),pretooluse:(?:Bash|Write):git push*,posttooluse:mcp__server\:tool:curl https://host/*";
     let out = yappr_hook(
         dir.path(),
         home.path(),
-        &["hooks", "install", "claude", "--events", events],
+        &["config", "--hook-events", events, "--output", "json"],
         "",
     )
     .await;
     assert!(out.status.success(), "{out:?}");
-    let settings: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.path().join("claude/settings.json")).unwrap())
-            .unwrap();
-    for (event, matcher) in [
-        ("PermissionRequest", "(?:Bash|Write)"),
-        ("PreToolUse", "(?:Bash|Write)"),
-        ("PostToolUse", r"mcp__server\:tool"),
-    ] {
-        assert_eq!(settings["hooks"][event][0]["matcher"], matcher);
-    }
-    assert!(
-        !settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("--events")
-    );
-    assert!(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap()
-        .contains("PreToolUse:(?:Bash|Write):git push*"));
+    let saved: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(saved["hooks"]["events"], events);
 }
 
 #[tokio::test]
@@ -1140,9 +1263,12 @@ async fn a_permission_request_waits_for_the_device_and_returns_its_decision() {
             .await
         });
         let entry = device.wait_for(n * 2 - 1).await.remove(n * 2 - 2);
-        assert_eq!(entry.title.as_deref(), Some("Claude: Bash"));
+        assert_eq!(
+            entry.title.as_deref(),
+            Some("Claude asks to use Bash in app")
+        );
         assert_eq!(entry.body, "rm -rf build");
-        assert_eq!(entry.subject.as_deref(), Some("project/app"));
+        assert_eq!(entry.subject.as_deref(), Some("claude/app"));
         let question = choices::question(&entry).unwrap();
         let conn = device.last.borrow().clone().unwrap();
         let _: control::Reply = control::exchange_on(
@@ -1184,14 +1310,15 @@ async fn other_events_post_and_failures_never_block_the_agent() {
     let entry = device.wait_for(1).await.remove(0);
     assert_eq!(
         (entry.kind.as_str(), entry.title.as_deref()),
-        ("codex.stop", Some("Codex finished"))
+        ("state", Some("Codex finished in app"))
     );
     assert_eq!(entry.body, "All tests pass.");
 
-    // No device, and an event that is not JSON: exit 0 and no decision.
+    // An unknown device, and an event that is not JSON: exit 0 and no
+    // decision.
     let ask = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
     for (args, input) in [
-        (vec!["hook", "--agent", "claude"], ask),
+        (vec!["hook", "--agent", "claude", "--to", "tablet"], ask),
         (
             vec!["hook", "--agent", "claude", "--to", "phone"],
             "not json",
@@ -1230,4 +1357,141 @@ async fn a_post_hook_does_not_wait_for_a_device_that_is_not_reachable() {
     let read = yappr(dir.path(), &["status", "--output", "json"]).await;
     let status: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
     assert_eq!(status["feed"]["entries"], 1, "{status}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn at_the_computer_the_hooks_stay_quiet_unless_set_to_always() {
+    let (dir, _device) = cli_writer().await;
+    let ask = r#"{"hook_event_name":"PermissionRequest","cwd":"/work/app","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    let stop = r#"{"hook_event_name":"Stop","cwd":"/work/app","last_assistant_message":"Done."}"#;
+    // Where yappr cannot tell, such as over SSH, the user can be at the
+    // terminal too.
+    for (input, presence) in [
+        (ask, "here"),
+        (stop, "here"),
+        (ask, "unknown"),
+        (stop, "unknown"),
+    ] {
+        let out = plugin_hook(
+            dir.path(),
+            "claude",
+            "Stop",
+            input,
+            &[("YAPPR_PRESENCE", presence)],
+        )
+        .await;
+        assert!(
+            out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+            "{out:?}"
+        );
+    }
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 0);
+    let home = tempfile::tempdir().unwrap();
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &["config", "--hook-when", "always"],
+        "",
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Agent hooks act: always"));
+    let out = plugin_hook(
+        dir.path(),
+        "claude",
+        "Stop",
+        stop,
+        &[("YAPPR_PRESENCE", "here")],
+    )
+    .await;
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 1);
+    // A plugin option replaces the saved setting.
+    let out = plugin_hook(
+        dir.path(),
+        "claude",
+        "Stop",
+        stop,
+        &[
+            ("YAPPR_PRESENCE", "here"),
+            ("CLAUDE_PLUGIN_OPTION_WHEN", "away"),
+        ],
+    )
+    .await;
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tool_steps_collect_on_one_card_until_the_turn_ends() {
+    let (dir, _device) = cli_writer().await;
+    let home = tempfile::tempdir().unwrap();
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &["config", "--hook-events", "posttooluse,stop"],
+        "",
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    for n in 1..=7 {
+        let input = serde_json::json!({"hook_event_name": "PostToolUse", "cwd": "/work/app", "tool_name": "Bash",
+            "tool_input": {"command": format!("step {n}")}, "tool_response": "ok"}).to_string();
+        let out = plugin_hook(dir.path(), "claude", "PostToolUse", &input, &[]).await;
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    }
+    // Another project has a card of its own.
+    let other = r#"{"hook_event_name":"PostToolUse","cwd":"/work/site","tool_name":"Read","tool_input":{"file_path":"/work/site/a"}}"#;
+    plugin_hook(dir.path(), "claude", "PostToolUse", other, &[]).await;
+    let entries = Store::open(dir.path()).unwrap().entries().unwrap();
+    let card = &entries[6];
+    assert_eq!(
+        (
+            card.kind.as_str(),
+            card.subject.as_deref(),
+            card.title.as_deref()
+        ),
+        (
+            "state",
+            Some("claude/app"),
+            Some("Claude is working in app")
+        )
+    );
+    assert_eq!(card.format.as_deref(), Some("markdown"));
+    let steps: Vec<&str> = card
+        .body
+        .lines()
+        .take_while(|l| l.starts_with("- "))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "- `Bash` · `step 3`",
+            "- `Bash` · `step 4`",
+            "- `Bash` · `step 5`",
+            "- `Bash` · `step 6`",
+            "- `Bash` · `step 7`"
+        ]
+    );
+    assert!(
+        card.body.contains("Last result:\n```\nok\n```"),
+        "{}",
+        card.body
+    );
+    assert_eq!(entries[7].subject.as_deref(), Some("claude/site"));
+    assert!(entries[7].body.starts_with("- `Read` · `a`"));
+
+    let stop =
+        r#"{"hook_event_name":"Stop","cwd":"/work/app","last_assistant_message":"All done."}"#;
+    plugin_hook(dir.path(), "claude", "Stop", stop, &[]).await;
+    let input = r#"{"hook_event_name":"PostToolUse","cwd":"/work/app","tool_name":"Bash","tool_input":{"command":"next"}}"#;
+    plugin_hook(dir.path(), "claude", "PostToolUse", input, &[]).await;
+    let entries = Store::open(dir.path()).unwrap().entries().unwrap();
+    assert_eq!(
+        (entries[8].title.as_deref(), entries[8].body.as_str()),
+        (Some("Claude finished in app"), "All done.")
+    );
+    assert_eq!(entries[9].body, "- `Bash` · `next`");
 }

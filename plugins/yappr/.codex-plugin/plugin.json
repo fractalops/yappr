@@ -1,0 +1,17 @@
+{
+  "name": "yappr",
+  "version": "0.1.8",
+  "description": "Lets the agent send updates and ask you questions on your phone with yappr.",
+  "author": {
+    "name": "fractalops"
+  },
+  "repository": "https://github.com/fractalops/yappr",
+  "license": "MIT OR Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "yappr",
+    "shortDescription": "Updates and questions on your phone",
+    "developerName": "fractalops",
+    "category": "Developer Tools"
+  }
+}

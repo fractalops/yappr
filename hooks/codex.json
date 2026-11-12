@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${PLUGIN_ROOT}/scripts/yappr-hook\" codex",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/yappr-hook\" codex permission",
             "timeout": 3600
           }
         ]
@@ -72,7 +72,7 @@
           {
             "type": "command",
             "command": "sh \"${PLUGIN_ROOT}/scripts/yappr-hook\" codex",
-            "timeout": 30
+            "timeout": 3
           }
         ]
       }

@@ -257,10 +257,19 @@ An empty value restores the default.
 
 In Claude Code, the plugin options **Device**, **Approval wait**, **Events**, and **Feed** replace these settings.
 An empty option keeps the setting of `yappr config`.
+Run `claude plugin configure yappr@yappr` to list the options.
+In Claude Code, use `/plugin configure yappr@yappr` to set them.
+Restart Claude Code to apply changes.
 The hook also reads `YAPPR_HOOK_TO`, `YAPPR_HOOK_TIMEOUT`, `YAPPR_HOOK_EVENTS`, and `YAPPR_FEED`.
 
 The plugin finds `yappr` on `PATH`, then in `~/.cargo/bin`. `YAPPR_BIN` replaces this search.
 If it cannot find `yappr`, it writes an install hint to stderr and gives no decision.
+Codex shows the hint as a warning when it asks for permission.
+In Claude Code, start the CLI with `--debug-file FILE` to see hook stderr in that file.
+
+To test a custom binary in the Codex CLI, start a local session with
+`YAPPR_BIN=/path/to/yappr codex --no-daemon`.
+A shared server can use a different environment or version from the CLI.
 
 `--hook-events` selects the events. Default: `permission,stop`.
 
@@ -277,6 +286,7 @@ If it cannot find `yappr`, it writes an install hint to stderr and gives no deci
 
 A request shows the tool and its command on the device. Approval allows the tool, and rejection denies it.
 With no answer before the timeout, the hook gives no decision. The agent applies its normal permission rules.
+Claude Code can show its terminal prompt while Yappr waits. The prompt remains available after the timeout.
 A hook always exits 0 and writes errors to stderr. An error never blocks the agent.
 
 A post hook saves the entry and returns. Another process delivers it. If no device is reachable, `start` or `retry` delivers it later.

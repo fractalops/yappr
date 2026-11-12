@@ -1022,6 +1022,16 @@ async fn plugin_options_replace_the_saved_settings_and_empty_options_keep_them()
     assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
     let entries = Store::open(dir.path()).unwrap().entries().unwrap();
     assert_eq!(entries.last().unwrap().kind, "claude.session");
+    let out = plugin_hook(
+        dir.path(),
+        "codex",
+        "SessionStart",
+        input,
+        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "session")],
+    )
+    .await;
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 1);
     // An unknown device is an error on stderr, not a decision.
     let out = plugin_hook(
         dir.path(),
@@ -1120,10 +1130,10 @@ fn plugin_hook_files_cover_every_event_and_outlast_the_wait() {
                 hooks["hooks"][event][0].get("matcher").is_none(),
                 "{agent} {event}"
             );
-            let wanted = if matches!(event, "PermissionRequest" | "PreToolUse") {
-                yappr::hooks::ASK_HOOK_TIMEOUT
-            } else {
-                30
+            let wanted = match (agent, event) {
+                (_, "PermissionRequest" | "PreToolUse") => yappr::hooks::ASK_HOOK_TIMEOUT,
+                ("codex", "SessionEnd") => 3,
+                _ => 30,
             };
             assert_eq!(handler["timeout"], wanted, "{agent} {event}");
             assert!(yappr::hooks::MAX_WAIT.as_secs() < yappr::hooks::ASK_HOOK_TIMEOUT);
@@ -1153,6 +1163,30 @@ async fn the_launcher_without_yappr_gives_a_hint_and_no_decision() {
     assert!(out.status.success(), "{out:?}");
     assert!(out.stdout.is_empty());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not installed"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_codex_permission_hook_shows_the_install_hint() {
+    let empty = tempfile::tempdir().unwrap();
+    let out = plugin_hook(
+        empty.path(),
+        "codex",
+        "PermissionRequest",
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#,
+        &[
+            ("PATH", "/usr/bin:/bin"),
+            ("CARGO_HOME", empty.path().to_str().unwrap()),
+            ("YAPPR_BIN", ""),
+        ],
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    let hint = "yappr is not installed";
+    assert!(String::from_utf8_lossy(&out.stderr).contains(hint));
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(result["systemMessage"].as_str().unwrap().contains(hint));
+    assert!(result.get("hookSpecificOutput").is_none());
 }
 
 #[tokio::test]

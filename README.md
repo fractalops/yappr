@@ -126,12 +126,13 @@ codex plugin add yappr@yappr
 ```
 
 > [!TIP]
-> Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
-> trust the yappr hooks. Do this again after each plugin update.
+> Codex runs new hooks only after you trust them. Start Codex and type `/hooks`.
+> Trust the Yappr hooks when Codex asks for review.
 
 The plugin asks the device that receives this feed to approve permission requests.
 When the agent finishes its turn, the plugin sends the agent's last message.
-Without an answer in time, the agent asks in the terminal as before.
+Without an answer in time, the agent uses its normal terminal prompt.
+Claude Code can show that prompt while Yappr waits.
 The plugin also gives the agent a skill to send updates and ask you questions.
 
 To change what the plugin does, use `yappr config`:

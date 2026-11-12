@@ -212,36 +212,46 @@ fn activity(
     agent: agent_hooks::Agent,
     title: String,
     step: Option<String>,
-    detail: String,
+    detail: Option<String>,
     subject: String,
 ) -> Result<Draft> {
     let mut steps: Vec<serde_json::Value> = Vec::new();
-    if let Some(step) = step {
+    let mut data = serde_json::Map::new();
+    let detail = if let Some(step) = step {
         let last = store.entries()?.into_iter().rev().find(|e| {
             e.kind == "state" && e.source == agent.name() && e.subject.as_deref() == Some(&subject)
         });
-        if let Some(Some(serde_json::Value::Array(old))) =
-            last.map(|e| e.data.as_ref().and_then(|d| d.get("steps")).cloned())
-        {
-            steps = old;
+        let last = last.as_ref().and_then(|e| e.data.as_ref());
+        if let Some(serde_json::Value::Array(old)) = last.and_then(|d| d.get("steps")) {
+            steps.clone_from(old);
         }
         steps.push(step.into());
         let extra = steps.len().saturating_sub(STEPS);
         steps.drain(..extra);
-    }
+        let result = detail.or_else(|| {
+            last.and_then(|d| d.get("command_result"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+        if let Some(result) = result.as_ref().filter(|s| !s.is_empty()) {
+            data.insert("command_result".into(), result.clone().into());
+        }
+        result
+    } else {
+        detail
+    };
     let mut body = steps
         .iter()
         .filter_map(serde_json::Value::as_str)
         .map(|s| format!("- {s}"))
         .collect::<Vec<_>>()
         .join("\n");
-    if !detail.is_empty() {
+    if let Some(detail) = detail.filter(|s| !s.is_empty()) {
         if !body.is_empty() {
             body.push_str("\n\n");
         }
         body.push_str(&detail);
     }
-    let mut data = serde_json::Map::new();
     data.insert("steps".into(), steps.into());
     Ok(Draft {
         source: agent.name().into(),
@@ -309,5 +319,42 @@ impl Settings {
             wait: wait.min(agent_hooks::MAX_WAIT),
             events,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_keeps_the_last_command_output_until_the_turn_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let add = |step: Option<&str>, detail: Option<&str>| {
+            let draft = activity(
+                &store,
+                agent_hooks::Agent::Claude,
+                "Claude activity".into(),
+                step.map(str::to_owned),
+                detail.map(str::to_owned),
+                "claude/project".into(),
+            )
+            .unwrap();
+            store.append(draft).unwrap()
+        };
+
+        add(Some("command"), Some("Last result:\n```\nOutput\n```"));
+        for step in ["file a", "file b", "file c", "file d"] {
+            add(Some(step), None);
+        }
+        let entry = add(Some("file e"), None);
+        assert_eq!(
+            entry.body,
+            "- file a\n- file b\n- file c\n- file d\n- file e\n\nLast result:\n```\nOutput\n```"
+        );
+        let entry = add(Some("quiet command"), Some(""));
+        assert!(!entry.body.contains("Last result"));
+        assert_eq!(add(None, Some("Done.")).body, "Done.");
+        assert_eq!(add(Some("next turn"), None).body, "- next turn");
     }
 }

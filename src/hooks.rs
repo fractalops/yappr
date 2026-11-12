@@ -300,8 +300,8 @@ pub enum Action {
         title: String,
         /// One line for the list of recent steps. None starts a new list.
         step: Option<String>,
-        /// Markdown below the steps, such as a result or the last message.
-        detail: String,
+        /// Markdown below the steps. None keeps the last command result.
+        detail: Option<String>,
         subject: String,
     },
     /// Post an entry of its own. The agent gets no decision.
@@ -340,28 +340,29 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
         },
         Event::PostToolUse | Event::PostToolUseFailure => {
             let failed = event == Event::PostToolUseFailure;
-            let result = match &input.error {
-                Some(error) => error.clone(),
-                None => input
-                    .tool_response
-                    .as_ref()
-                    .map(output_of)
-                    .unwrap_or_default(),
-            };
             let target = summary(input.tool_input.as_ref(), input.cwd.as_deref());
             let mut step = format!("{}{}", code(tool), if failed { " failed" } else { "" });
             if !target.is_empty() {
                 step.push_str(&format!(" · {}", code(&target)));
             }
-            let detail = if result.trim().is_empty() {
-                String::new()
-            } else {
+            let detail = shell_tool(tool).then(|| {
+                let result = match &input.error {
+                    Some(error) => error.clone(),
+                    None => input
+                        .tool_response
+                        .as_ref()
+                        .map(output_of)
+                        .unwrap_or_default(),
+                };
+                if result.trim().is_empty() {
+                    return String::new();
+                }
                 format!(
                     "{}\n{}",
                     if failed { "Error:" } else { "Last result:" },
                     fenced(&limited_text(result.trim(), MAX_RESULT))
                 )
-            };
+            });
             Action::Activity {
                 title: format!("{name} is working"),
                 step: Some(step),
@@ -382,7 +383,9 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
                 format!("{name}: a subagent finished")
             },
             step: None,
-            detail: text(input.last_assistant_message.as_deref().unwrap_or_default()),
+            detail: Some(text(
+                input.last_assistant_message.as_deref().unwrap_or_default(),
+            )),
             subject,
         },
     }
@@ -432,9 +435,14 @@ const MAX_STEP: usize = 80;
 /// The most bytes of a tool result on the activity card.
 const MAX_RESULT: usize = 2 * 1024;
 
-/// The text output of a tool: a text result, or the stdout and stderr of a
-/// command. Other results, such as the content of a file that the tool
-/// read, are not shown.
+fn shell_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Bash" | "PowerShell" | "exec_command" | "shell_command" | "write_stdin"
+    )
+}
+
+/// The text output of a shell tool.
 fn output_of(response: &Value) -> String {
     match response {
         Value::String(text) => text.clone(),
@@ -457,6 +465,7 @@ fn summary(input: Option<&Value>, cwd: Option<&str>) -> String {
     };
     let main = [
         "command",
+        "cmd",
         "file_path",
         "path",
         "url",
@@ -467,12 +476,6 @@ fn summary(input: Option<&Value>, cwd: Option<&str>) -> String {
     .iter()
     .find_map(|key| input.get(key).and_then(Value::as_str))
     .map(str::to_owned)
-    .or_else(|| {
-        input
-            .as_object()
-            .and_then(|o| o.values().find_map(Value::as_str))
-            .map(str::to_owned)
-    })
     .unwrap_or_default();
     let main = match cwd.map(|c| format!("{}/", c.trim_end_matches('/'))) {
         Some(prefix) => main
@@ -654,7 +657,7 @@ mod tests {
             Action::Activity {
                 title: "Codex finished".into(),
                 step: None,
-                detail: "Done.".into(),
+                detail: Some("Done.".into()),
                 subject: "codex".into(),
             }
         );
@@ -884,19 +887,54 @@ mod tests {
             };
             assert_eq!(title, format!("{} is working", agent.title()));
             assert_eq!(actual_step, step);
+            let detail = detail.expect("command result");
             assert!(detail.contains(result), "{detail}");
             assert_eq!(subject, format!("{agent}/app"));
         }
         let Action::Activity { detail, .. } = plan(
             Agent::Claude,
             &input(json!({
-                "hook_event_name": "PostToolUse", "tool_response": "\u{1b}[31m".to_owned() + &"é".repeat(MAX_TEXT)
+                "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_response": "\u{1b}[31m".to_owned() + &"é".repeat(MAX_TEXT)
             })),
         ) else {
             panic!()
         };
+        let detail = detail.expect("command result");
         assert!(detail.len() <= MAX_RESULT + 32 && detail.contains('…'));
         assert!(!detail.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn activity_does_not_show_file_content_or_raw_tool_results() {
+        for (agent, tool, args, response, expected) in [
+            (
+                Agent::Claude,
+                "Read",
+                json!({"file_path": "/work/app/fixture.txt"}),
+                json!("private content"),
+                "`Read` · `fixture.txt`",
+            ),
+            (
+                Agent::Codex,
+                "apply_patch",
+                json!({"patch": "private content"}),
+                json!({"output": "private content"}),
+                "`apply_patch`",
+            ),
+        ] {
+            let Action::Activity { step, detail, .. } = plan(
+                agent,
+                &input(json!({
+                    "hook_event_name": "PostToolUse", "cwd": "/work/app", "tool_name": tool,
+                    "tool_input": args, "tool_response": response,
+                })),
+            ) else {
+                panic!("expected activity");
+            };
+            assert_eq!(step.as_deref(), Some(expected));
+            assert_eq!(detail, None);
+        }
     }
 
     #[test]

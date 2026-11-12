@@ -108,25 +108,19 @@ question expires, you cancel it, or an error occurs.
 
 ## Coding agents
 
-The yappr plugin lets Claude Code and Codex send you updates and ask you questions on your phone.
-Install Yappr first, then install the plugin for your agent.
-
-For Claude Code:
+The yappr plugin lets Claude Code and Codex send you updates and ask you questions when they need you.
 
 ```sh
+# Claude Code
 claude plugin marketplace add fractalops/yappr
 claude plugin install yappr@yappr
-```
 
-For Codex:
-
-```sh
+# Codex
 codex plugin marketplace add fractalops/yappr
 codex plugin add yappr@yappr
 ```
 
-The agent uses the plugin only when it decides to send an update or to ask you a question.
-To also send permission requests to your phone while you are away, see [agent hooks](docs/hooks-reference.md). Agent hooks are experimental.
+Experimental: [agent hooks](docs/hooks-reference.md) send permission requests to your phone while you are away.
 
 ## Reference
 

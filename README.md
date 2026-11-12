@@ -120,7 +120,7 @@ codex plugin marketplace add fractalops/yappr
 codex plugin add yappr@yappr
 ```
 
-Experimental: [agent hooks](docs/hooks-reference.md) send permission requests to your phone while you are away.
+Experimental: [agent hooks](docs/hooks-reference.md) let you approve or reject the agent's permission requests from your other device, and show when it finishes. They act only while you are away from the computer.
 
 ```sh
 # Claude Code

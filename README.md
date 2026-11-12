@@ -108,7 +108,8 @@ question expires, you cancel it, or an error occurs.
 
 ## Coding agents
 
-The yappr plugin lets Claude Code and Codex send you updates and ask you questions when they need you.
+The yappr plugin teaches Claude Code and Codex to use `yappr post`, `yappr ask`, and `yappr approve`.
+Then you can tell the agent, for example, to post its progress or to get your approval before a deploy.
 
 ```sh
 # Claude Code

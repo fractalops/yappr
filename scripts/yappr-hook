@@ -1,0 +1,27 @@
+#!/bin/sh
+# Runs `yappr hook` for the yappr plugins of Claude Code and Codex.
+# Usage: yappr-hook claude|codex, with the hook event as JSON on stdin.
+#
+# Without yappr, this script writes an install hint to stderr and exits 0.
+# The agent then asks for permission in the terminal as before.
+
+# Claude Code gives the plugin options as CLAUDE_PLUGIN_OPTION_*. An empty
+# option keeps the setting of `yappr config`.
+if [ -n "${CLAUDE_PLUGIN_OPTION_DEVICE:-}" ]; then export YAPPR_HOOK_TO="$CLAUDE_PLUGIN_OPTION_DEVICE"; fi
+if [ -n "${CLAUDE_PLUGIN_OPTION_TIMEOUT:-}" ]; then export YAPPR_HOOK_TIMEOUT="$CLAUDE_PLUGIN_OPTION_TIMEOUT"; fi
+if [ -n "${CLAUDE_PLUGIN_OPTION_EVENTS:-}" ]; then export YAPPR_HOOK_EVENTS="$CLAUDE_PLUGIN_OPTION_EVENTS"; fi
+if [ -n "${CLAUDE_PLUGIN_OPTION_FEED:-}" ]; then export YAPPR_FEED="$CLAUDE_PLUGIN_OPTION_FEED"; fi
+
+if [ -n "${YAPPR_BIN:-}" ]; then
+  yappr=$YAPPR_BIN
+elif command -v yappr >/dev/null 2>&1; then
+  yappr=$(command -v yappr)
+elif [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/yappr" ]; then
+  yappr="${CARGO_HOME:-$HOME/.cargo}/bin/yappr"
+else
+  echo "yappr hook: yappr is not installed. Install it from https://github.com/fractalops/yappr#install" >&2
+  cat >/dev/null
+  exit 0
+fi
+
+exec "$yappr" hook --agent "$1"

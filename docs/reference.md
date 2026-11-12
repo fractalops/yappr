@@ -33,7 +33,6 @@ Commands operate on the selected local feed unless they name a writer.
 | `id`, `ticket` | Print the local endpoint ID or feed ticket |
 | `status`, `health WRITER` | Inspect local state or probe a writer's connection |
 | `config` | Show or save the settings for this feed |
-| `hooks install AGENT`, `hooks status`, `hooks remove AGENT` | Connect Claude Code or Codex to a device |
 
 ## Output
 
@@ -242,29 +241,28 @@ Feed records use the `choices` extension with type `question`, `decision`, or `c
 
 ## Agent hooks
 
+The yappr plugins for Claude Code and Codex run `yappr hook` for each agent event.
+The [README](../README.md#coding-agents) shows how to install them.
+
 ```sh
-yappr hooks install claude --to phone --timeout 5m
-yappr hooks install claude \
-  --events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
-yappr hooks install codex --scope project --events permission,stop,posttooluse:Bash
+yappr config --hook-to phone --hook-timeout 5m
+yappr config --hook-events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
+yappr config --hook-to "" --hook-timeout "" --hook-events ""
 ```
 
-`install` adds the yappr hooks to the settings of the agent. It keeps the other hooks and saves a copy of the old file as `FILE.yappr-backup`.
-Running `install` again replaces the yappr hooks. `status` lists the installed hooks. `remove` removes only the yappr hooks.
+`--hook-to DEVICE` selects the device that answers. Without it, the hook asks the one device that receives the feed.
+If several devices can answer, set `--hook-to`.
+`--hook-timeout DURATION` sets how long a request waits. Default: `2m`. Maximum: `59m`.
+An empty value restores the default.
 
-| Scope | Claude Code | Codex |
-|---|---|---|
-| `user` (default) | `~/.claude/settings.json` | `~/.codex/hooks.json` |
-| `project` | `.claude/settings.json` | `.codex/hooks.json` |
-| `local` | `.claude/settings.local.json` | Not available |
+In Claude Code, the plugin options **Device**, **Approval wait**, **Events**, and **Feed** replace these settings.
+An empty option keeps the setting of `yappr config`.
+The hook also reads `YAPPR_HOOK_TO`, `YAPPR_HOOK_TIMEOUT`, `YAPPR_HOOK_EVENTS`, and `YAPPR_FEED`.
 
-`CLAUDE_CONFIG_DIR` and `CODEX_HOME` replace `~/.claude` and `~/.codex`.
+The plugin finds `yappr` on `PATH`, then in `~/.cargo/bin`. `YAPPR_BIN` replaces this search.
+If it cannot find `yappr`, it writes an install hint to stderr and gives no decision.
 
-`--to DEVICE` selects the device that answers. Without it, `install` uses the one device that receives the feed.
-If several devices can answer, give `--to`. `--timeout DURATION` sets how long a request waits. Default: `2m`.
-The hook command saves the feed directory, the device, and the timeout.
-
-`--events` selects the events. Default: `permission,stop`.
+`--hook-events` selects the events. Default: `permission,stop`.
 
 | Event | Agent event | What yappr does |
 |---|---|---|
@@ -291,13 +289,13 @@ Codex runs new or changed hooks only after you trust them with `/hooks`. Without
 
 ### Command filters
 
-Each event entry uses `event[:matcher[:command-pattern]]`. The agent applies the matcher, such as `Bash` or `Edit|Write`.
+Each event entry uses `event[:matcher[:command-pattern]]`. The matcher is a regular expression for the whole tool name, such as `Bash` or `Edit|Write`.
 For `pretooluse`, `posttooluse`, and `posttoolusefailure`, the third field filters `tool_input.command`.
 `PermissionRequest` does not accept a command pattern.
 
 ```sh
-yappr hooks install claude \
-  --events 'permission,stop,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*'
+yappr config \
+  --hook-events 'permission,stop,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*'
 ```
 
 Patterns match the whole command text and are case-sensitive. `*` matches any text, including an empty string.
@@ -314,11 +312,11 @@ These filters select hook actions by text. They do not identify every command th
 
 Use one matcher per event. Combine tool names with `|`, such as `Bash|Read`.
 Repeat the same event and matcher to accept any listed command pattern. Overlapping patterns produce one hook action.
-Yappr rejects different matchers for the same event before changing the settings file.
+Yappr rejects different matchers for the same event before it saves the settings.
 An entry without a command pattern accepts all calls for its matcher. Calls without a string `tool_input.command` do not match a command pattern.
-Other events keep their selected behavior. `--events` replaces the default selection, so include `permission,stop` to retain those hooks.
+Other events keep their selected behavior. `--hook-events` replaces the default selection, so include `permission,stop` to keep them.
 
-Quote the `--events` argument to protect spaces, wildcards, and `|` from the shell.
+Quote the `--hook-events` argument to protect spaces, wildcards, and `|` from the shell.
 The matcher can contain regex groups and character classes. Colons inside them stay in the matcher, such as `(?:Bash|Write)` or `[a:z]`.
 Escape a literal colon outside them as `\:`, such as `posttooluse:mcp__server\:tool`.
 The next unescaped colon outside groups and classes starts the command pattern.
@@ -494,12 +492,14 @@ yappr config --default-relays
 yappr config --no-relay
 yappr config --no-mdns
 yappr config --mdns
+yappr config --hook-to phone --hook-timeout 5m --hook-events permission,stop
 ```
 
 `config` shows the settings for this feed. You can save more than one setting in one call.
 On other commands, `--relay`, `--no-relay`, and `--no-mdns` apply to that run.
 An empty writer name uses the computer name. `start --name` and `pair --name` set the name for one invitation.
 Restart `start` after a change to the relay or local discovery settings.
+The `--hook-*` options are described in [Agent hooks](#agent-hooks).
 Custom URLs replace this device's home relays. Peers can advertise other relays.
 `--no-relay` requires a reachable direct path. Relays forward encrypted live traffic and cannot read it.
 They do not store entries for offline devices.

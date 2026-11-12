@@ -96,7 +96,6 @@ pub(super) async fn run() -> Result<()> {
             hooks::hook(common, args).await;
             Ok(())
         }
-        Commands::Hooks { command } => hooks::hooks_command(common, command),
         Commands::Deny { id } => devices::deny(common, id),
         Commands::Allowed => {
             for id in common.store()?.allow_list().load()? {
@@ -163,8 +162,9 @@ pub(super) async fn run() -> Result<()> {
             name,
             default_relays,
             mdns,
+            hooks,
             output,
-        } => config::run(common, name, default_relays, mdns, output),
+        } => config::run(common, name, default_relays, mdns, hooks, output),
         Commands::Pair(args) => pairing::pair(common, args).await,
         Commands::Join {
             invitation,

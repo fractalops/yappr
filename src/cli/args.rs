@@ -153,23 +153,8 @@ pub(super) enum Commands {
         receives: bool,
     },
 
-    /// Connect a coding agent to your devices with hooks.
-    ///
-    /// The agent's permission requests become approvals on a device, and
-    /// the agent posts when it needs input or finishes. Without an answer
-    /// in time, the agent asks in the terminal as before.
-    #[clap(after_help = "Examples:
-  yappr hooks install claude
-  yappr hooks install codex --to phone
-  yappr hooks status
-  yappr hooks remove claude")]
-    Hooks {
-        #[clap(subcommand)]
-        command: HooksCommand,
-    },
-
-    /// Handle one hook event of a coding agent. The agent runs this command
-    /// and gives the event as JSON on stdin.
+    /// Handle one hook event of a coding agent. The yappr plugin of the agent
+    /// runs this command and gives the event as JSON on stdin.
     #[clap(hide = true)]
     Hook(HookArgs),
 
@@ -285,6 +270,8 @@ pub(super) enum Commands {
         /// Find and announce endpoints on the local network (mDNS).
         #[clap(long)]
         mdns: bool,
+        #[clap(flatten)]
+        hooks: HookConfigArgs,
         /// The output format.
         #[clap(long, value_enum, default_value = "text")]
         output: Format,
@@ -416,61 +403,42 @@ pub(super) struct ApprovalArgs {
     #[clap(long)]
     pub(super) unlock: bool,
 }
-#[derive(Subcommand, Debug)]
-pub(super) enum HooksCommand {
-    /// Add the yappr hooks to the settings of an agent. Other hooks stay.
-    Install {
-        agent: yappr::hooks::Agent,
-        /// The device that answers. The default is the one device that
-        /// receives this feed.
-        #[clap(long, value_name = "DEVICE")]
-        to: Option<String>,
-        /// Comma-separated event[:matcher[:command-pattern]] entries, such as
-        /// permission,stop,posttooluse:Bash:cargo test*. Patterns use * and ?.
-        /// The default is permission and stop.
-        #[clap(long)]
-        events: Option<String>,
-        /// Which settings file to change.
-        #[clap(long, value_enum, default_value_t = HookScope::User)]
-        scope: HookScope,
-        /// How long a hook waits for an answer, such as 2m.
-        #[clap(long, value_parser = parse_interval, default_value = "2m")]
-        timeout: Duration,
-    },
-    /// Show the yappr hooks in the settings of each agent.
-    Status { agent: Option<yappr::hooks::Agent> },
-    /// Remove the yappr hooks from the settings of an agent.
-    Remove {
-        agent: yappr::hooks::Agent,
-        #[clap(long, value_enum, default_value_t = HookScope::User)]
-        scope: HookScope,
-    },
+/// The agent hook settings of `yappr config`. An empty value restores the
+/// default.
+#[derive(clap::Args, Debug, Default)]
+pub(super) struct HookConfigArgs {
+    /// The device that answers agent approvals. The default is the one device
+    /// that receives this feed.
+    #[clap(long, value_name = "DEVICE")]
+    pub(super) hook_to: Option<String>,
+    /// How long an agent approval waits, such as 5m. At most 59m. Default: 2m.
+    #[clap(long, value_name = "DURATION")]
+    pub(super) hook_timeout: Option<String>,
+    /// The agent events, as event[:matcher[:command-pattern]] entries
+    /// separated by commas. Default: permission,stop.
+    #[clap(long, value_name = "EVENTS")]
+    pub(super) hook_events: Option<String>,
 }
 
-/// The settings file of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(super) enum HookScope {
-    /// Your settings, for all projects.
-    User,
-    /// The settings of this project, in its repository.
-    Project,
-    /// The settings of this project on this machine. Claude Code only.
-    Local,
+impl HookConfigArgs {
+    pub(super) fn any(&self) -> bool {
+        self.hook_to.is_some() || self.hook_timeout.is_some() || self.hook_events.is_some()
+    }
 }
 
 #[derive(clap::Args, Debug)]
 pub(super) struct HookArgs {
     #[clap(long, value_enum)]
     pub(super) agent: yappr::hooks::Agent,
-    /// The device that answers.
+    /// The device that answers. The default comes from config.
     #[clap(long)]
     pub(super) to: Option<String>,
-    /// The per-event command filters saved by hooks install.
-    #[clap(long, hide = true)]
+    /// The selected events. The default comes from config.
+    #[clap(long)]
     pub(super) events: Option<String>,
-    /// How long to wait for an answer.
-    #[clap(long, value_parser = parse_interval, default_value = "2m")]
-    pub(super) timeout: Duration,
+    /// How long to wait for an answer. The default comes from config.
+    #[clap(long, value_parser = parse_interval)]
+    pub(super) timeout: Option<Duration>,
     /// Deliver the feed through this entry, and read no event.
     #[clap(long, hide = true)]
     pub(super) deliver: Option<u64>,
@@ -608,7 +576,7 @@ fn parse_data(s: &str) -> Result<serde_json::Map<String, serde_json::Value>, Str
     }
 }
 
-fn parse_interval(s: &str) -> Result<Duration, String> {
+pub(super) fn parse_interval(s: &str) -> Result<Duration, String> {
     let d: jiff::SignedDuration = s
         .parse()
         .map_err(|_| "use a duration such as 500ms, 2s or 1m".to_string())?;

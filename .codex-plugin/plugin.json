@@ -1,0 +1,18 @@
+{
+  "name": "yappr",
+  "version": "0.1.8",
+  "description": "Approve agent tool requests and get turn updates on your phone with yappr.",
+  "author": {
+    "name": "fractalops"
+  },
+  "repository": "https://github.com/fractalops/yappr",
+  "license": "MIT OR Apache-2.0",
+  "hooks": "./hooks/codex.json",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "yappr",
+    "shortDescription": "Agent approvals on your phone",
+    "developerName": "fractalops",
+    "category": "Developer Tools"
+  }
+}

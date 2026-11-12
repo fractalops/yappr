@@ -12,6 +12,23 @@ pub struct FeedConfig {
     pub name: Option<String>,
     pub relays: RelaySettings,
     pub mdns: bool,
+    pub hooks: HookSettings,
+}
+
+/// The settings of `yappr hook`, for the agent plugins. An unset value uses
+/// the default of the hook.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HookSettings {
+    /// The device that answers approvals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// How long an approval waits, in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// The selected events, as `event[:matcher[:command-pattern]]` entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<String>,
 }
 
 impl Default for FeedConfig {
@@ -20,6 +37,7 @@ impl Default for FeedConfig {
             name: None,
             relays: RelaySettings::default(),
             mdns: true,
+            hooks: HookSettings::default(),
         }
     }
 }

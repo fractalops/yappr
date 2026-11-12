@@ -1,0 +1,14 @@
+{
+  "name": "yappr",
+  "owner": {
+    "name": "fractalops"
+  },
+  "plugins": [
+    {
+      "name": "yappr",
+      "source": "./",
+      "description": "Approve agent tool requests and get turn updates on your phone with yappr.",
+      "category": "productivity"
+    }
+  ]
+}

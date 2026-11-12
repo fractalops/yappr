@@ -2,11 +2,12 @@
 //! event, such as a permission request, and yappr asks a device or posts an
 //! entry.
 //!
-//! [`plan`] turns the event JSON that the agent sends on stdin into an
-//! [`Action`]. [`decision`] is the JSON that the agent reads back. [`install`]
-//! and [`remove`] change the hook entries in a settings file and keep the
-//! entries of other tools.
-use std::fmt;
+//! The agent plugins in this repository run `yappr hook` for every event
+//! that yappr supports. [`parse_events`] reads the events that the user
+//! selected, and [`plan_selected`] turns the event JSON that the agent sends
+//! on stdin into an [`Action`]. [`decision`] is the JSON that the agent reads
+//! back.
+use std::{fmt, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -98,6 +99,14 @@ impl Event {
     }
 }
 
+/// The timeout of an approval hook in the plugin hook files, in seconds.
+pub const ASK_HOOK_TIMEOUT: u64 = 3600;
+/// The longest wait for an answer. The hook gives its own result before the
+/// agent stops it at [`ASK_HOOK_TIMEOUT`].
+pub const MAX_WAIT: Duration = Duration::from_secs(ASK_HOOK_TIMEOUT - 60);
+/// The wait for an answer when the settings give none.
+pub const DEFAULT_WAIT: Duration = Duration::from_secs(120);
+
 const ALL: [Event; 9] = [
     Event::PermissionRequest,
     Event::PreToolUse,
@@ -110,13 +119,12 @@ const ALL: [Event; 9] = [
     Event::SubagentStop,
 ];
 
-/// The events of an install without --events.
-pub fn default_events(agent: Agent) -> Vec<Selected> {
+/// The events when the settings select none.
+pub fn default_events() -> Vec<Selected> {
     // A Claude notification repeats a permission request or a stop, so it is
     // not a default.
     [Event::PermissionRequest, Event::Stop]
         .into_iter()
-        .filter(|e| e.supported(agent))
         .map(|event| Selected {
             event,
             matcher: None,
@@ -125,36 +133,20 @@ pub fn default_events(agent: Agent) -> Vec<Selected> {
         .collect()
 }
 
-/// An event to install, with its agent matcher and command patterns.
+/// A selected event, with its tool matcher and command patterns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selected {
     pub event: Event,
+    /// A regular expression for the whole tool name, such as `Bash|Read`.
+    /// None accepts every tool.
     pub matcher: Option<String>,
     /// Any pattern may match. An empty list accepts every command.
     pub commands: Vec<String>,
 }
 
-impl Selected {
-    /// The event selection saved in the installed hook command.
-    pub fn selector(&self) -> String {
-        let mut prefix = self.event.key().to_string();
-        if let Some(matcher) = &self.matcher {
-            prefix.push(':');
-            prefix.push_str(matcher);
-        }
-        if self.commands.is_empty() {
-            return prefix;
-        }
-        self.commands
-            .iter()
-            .map(|pattern| format!("{prefix}:{pattern}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-}
-
 /// Parse `event[:matcher[:command-pattern]]` entries separated by commas.
-pub fn parse_events(agent: Agent, text: &str) -> Result<Vec<Selected>> {
+/// An event that an agent does not have never occurs for that agent.
+pub fn parse_events(text: &str) -> Result<Vec<Selected>> {
     let mut out: Vec<Selected> = Vec::new();
     for item in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let (name, matcher, pattern) = match item.split_once(':') {
@@ -182,10 +174,10 @@ pub fn parse_events(agent: Agent, text: &str) -> Result<Vec<Selected>> {
                 "unknown event {other:?}. Use permission, pretooluse:TOOL, posttooluse, posttoolusefailure, notification, stop, session, or subagent"
             ),
         };
+        if let Some(matcher) = matcher {
+            matcher_regex(matcher)?;
+        }
         for event in events {
-            if !event.supported(agent) {
-                bail!("{agent} has no {} event", event.key());
-            }
             if event == Event::PreToolUse && matcher.is_none() {
                 bail!("give the tools for pretooluse, such as pretooluse:Bash");
             }
@@ -267,6 +259,12 @@ fn merge_selection(events: &mut Vec<Selected>, selected: Selected) -> Result<()>
         events.push(selected);
     }
     Ok(())
+}
+
+/// The tool matcher as a regular expression over the whole tool name.
+fn matcher_regex(matcher: &str) -> Result<regex::Regex> {
+    regex::Regex::new(&format!(r"\A(?:{matcher})\z"))
+        .with_context(|| format!("the tool matcher {matcher:?} is not a valid regular expression"))
 }
 
 /// Literal whole-command matching, with only `*` and `?` as wildcards.
@@ -412,16 +410,20 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
     }
 }
 
-/// Apply the command filters of the installed handler before it takes action.
-/// The agent applies its tool-name matcher when selecting this handler.
+/// The action for one event of `agent`, if the event, its tool and its
+/// command match one of the selected `events`.
 pub fn plan_selected(agent: Agent, input: &Input, events: &[Selected]) -> Action {
     let command = input
         .tool_input
         .as_ref()
         .and_then(|v| v.get("command"))
         .and_then(Value::as_str);
+    let tool = input.tool_name.as_deref();
     let matches = events.iter().any(|selected| {
         selected.event.key() == input.hook_event_name
+            && selected.matcher.as_deref().is_none_or(|matcher| {
+                tool.is_some_and(|tool| matcher_regex(matcher).is_ok_and(|r| r.is_match(tool)))
+            })
             && (selected.commands.is_empty()
                 || command.is_some_and(|command| {
                     selected.commands.iter().any(|pattern| {
@@ -539,166 +541,6 @@ pub fn decision(agent: Agent, event: Event, approved: bool) -> Value {
     }
 }
 
-/// The part of a hook command that marks it as an entry of yappr.
-const MARK: &str = " hook --agent ";
-
-/// The command that the agent runs for one event, with the feed directory
-/// `dir` of the install.
-pub fn command(
-    program: &str,
-    dir: &str,
-    agent: Agent,
-    device: Option<&str>,
-    timeout_secs: u64,
-) -> String {
-    let mut out = format!(
-        "{} --dir {}{MARK}{}",
-        quote(program),
-        quote(dir),
-        agent.name()
-    );
-    if let Some(device) = device {
-        out.push_str(&format!(" --to {}", quote(device)));
-    }
-    out.push_str(&format!(" --timeout {timeout_secs}s"));
-    out
-}
-
-/// `text` in single quotes for a POSIX shell.
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
-}
-
-/// True if this hook entry is one of yappr's.
-fn is_ours(hook: &Value) -> bool {
-    hook.get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|c| c.contains(MARK))
-}
-
-/// Add the hook entries for `events` to the settings `settings`, after the
-/// entries of other tools, and replace earlier entries of yappr. A hook that
-/// asks gets `ask_timeout` seconds plus a margin, so that its own deadline
-/// comes first.
-pub fn install(
-    settings: &mut Value,
-    events: &[Selected],
-    command_for: impl Fn(Event) -> String,
-    ask_timeout: u64,
-) -> Result<()> {
-    // Validate and merge before changing any existing settings. Callers may
-    // construct selections directly rather than through parse_events.
-    let mut selections = Vec::new();
-    for selected in events {
-        merge_selection(&mut selections, selected.clone())?;
-    }
-    remove(settings);
-    let Some(root) = settings.as_object_mut() else {
-        bail!("the settings file is not a JSON object");
-    };
-    let hooks = root
-        .entry("hooks")
-        .or_insert_with(|| Value::Object(Map::new()));
-    let Some(hooks) = hooks.as_object_mut() else {
-        bail!("\"hooks\" in the settings file is not a JSON object");
-    };
-    for selected in &selections {
-        let groups = hooks
-            .entry(selected.event.key())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        let Some(groups) = groups.as_array_mut() else {
-            bail!(
-                "hooks.{} in the settings file is not a list",
-                selected.event.key()
-            );
-        };
-        let timeout = if selected.event.asks() {
-            ask_timeout + 30
-        } else {
-            30
-        };
-        let mut group = Map::new();
-        if let Some(matcher) = &selected.matcher {
-            group.insert("matcher".into(), matcher.clone().into());
-        }
-        group.insert(
-            "hooks".into(),
-            json!([{
-                "type": "command",
-                "command": if selected.commands.is_empty() {
-                    command_for(selected.event)
-                } else {
-                    format!("{} --events {}", command_for(selected.event), quote(&selected.selector()))
-                },
-                "timeout": timeout,
-            }]),
-        );
-        groups.push(Value::Object(group));
-    }
-    Ok(())
-}
-
-/// Remove the hook entries of yappr, and the lists that become empty.
-/// Returns true if there were any.
-pub fn remove(settings: &mut Value) -> bool {
-    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
-        return false;
-    };
-    let mut removed = false;
-    for groups in hooks.values_mut() {
-        let Some(groups) = groups.as_array_mut() else {
-            continue;
-        };
-        for group in groups.iter_mut() {
-            if let Some(list) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-                let before = list.len();
-                list.retain(|hook| !is_ours(hook));
-                removed |= list.len() != before;
-            }
-        }
-        groups.retain(|group| {
-            group
-                .get("hooks")
-                .and_then(Value::as_array)
-                .is_none_or(|list| !list.is_empty())
-        });
-    }
-    hooks.retain(|_, groups| groups.as_array().is_none_or(|g| !g.is_empty()));
-    if hooks.is_empty() {
-        if let Some(root) = settings.as_object_mut() {
-            root.remove("hooks");
-        }
-    }
-    removed
-}
-
-/// The installed events of yappr, with their commands.
-pub fn installed(settings: &Value) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
-        return out;
-    };
-    for (event, groups) in hooks {
-        for group in groups.as_array().into_iter().flatten() {
-            for hook in group
-                .get("hooks")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                if is_ours(hook) {
-                    let command = hook
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    out.push((event.clone(), command.to_string()));
-                }
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,59 +621,17 @@ mod tests {
     }
 
     #[test]
-    fn install_keeps_other_hooks_and_replaces_its_own() {
-        let mut settings = json!({
-            "model": "x",
-            "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-tool"}]}]},
-        });
-        let command = |_: Event| {
-            command(
-                "/example/yappr",
-                "/example/feed",
-                Agent::Claude,
-                Some("phone"),
-                120,
-            )
-        };
-        install(&mut settings, &default_events(Agent::Claude), command, 120).unwrap();
-        install(&mut settings, &default_events(Agent::Claude), command, 120).unwrap();
-        let stop = settings["hooks"]["Stop"].as_array().unwrap();
-        assert_eq!(stop.len(), 2, "{settings}");
-        assert_eq!(stop[0]["hooks"][0]["command"], "other-tool");
-        assert_eq!(
-            settings["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"],
-            150
-        );
-        assert_eq!(installed(&settings).len(), 2);
-        assert_eq!(settings["model"], "x");
-
-        assert!(remove(&mut settings));
-        assert_eq!(
-            settings,
-            json!({"model": "x", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}})
-        );
-        let mut empty = json!({});
-        install(&mut empty, &default_events(Agent::Codex), command, 120).unwrap();
-        assert!(empty["hooks"].get("Notification").is_none());
-        remove(&mut empty);
-        assert_eq!(empty, json!({}));
-    }
-
-    #[test]
     fn events_parse_with_tool_matchers() {
-        let events = parse_events(Agent::Claude, "permission, pretooluse:Bash, session").unwrap();
+        let events = parse_events("permission, pretooluse:Bash, session").unwrap();
         assert_eq!(events.len(), 4);
         assert_eq!(events[1].matcher.as_deref(), Some("Bash"));
-        assert!(parse_events(Agent::Codex, "notification").is_err());
-        assert!(parse_events(Agent::Claude, "pretooluse").is_err());
-        assert!(parse_events(Agent::Claude, "loud").is_err());
+        assert!(parse_events("pretooluse").is_err());
+        assert!(parse_events("loud").is_err());
     }
 
     #[test]
     fn command_filters_belong_to_each_event_and_merge_repeated_patterns() {
-        let events = parse_events(
-            Agent::Claude,
-            "permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*,posttooluse:Bash:cargo test*",
+        let events = parse_events("permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*,posttooluse:Bash:cargo test*",
         ).unwrap();
         assert_eq!(events.len(), 4);
         assert_eq!(events[2].commands, ["git push*"]);
@@ -879,7 +679,7 @@ mod tests {
                 "{pattern}: {command}"
             );
         }
-        let events = parse_events(Agent::Claude, "pretooluse:Bash:*").unwrap();
+        let events = parse_events("pretooluse:Bash:*").unwrap();
         assert_eq!(
             plan_selected(
                 Agent::Claude,
@@ -901,28 +701,20 @@ mod tests {
             "pretooluse::git *",
             "posttooluse:Bash:",
         ] {
-            assert!(parse_events(Agent::Claude, value).is_err(), "{value}");
+            assert!(parse_events(value).is_err(), "{value}");
         }
-        assert!(parse_events(Agent::Codex, "posttoolusefailure:Bash:*").is_err());
-        let selected =
-            parse_events(Agent::Claude, "posttooluse:Bash:curl https://example.com/*").unwrap();
+        let selected = parse_events("posttooluse:Bash:curl https://example.com/*").unwrap();
         assert_eq!(selected[0].commands, ["curl https://example.com/*"]);
-        assert_eq!(
-            parse_events(Agent::Claude, &selected[0].selector()).unwrap(),
-            selected
-        );
         for value in [
             "posttooluse:Bash,posttooluse:Bash:cargo *",
             "posttooluse:Bash:cargo *,posttooluse:Bash",
         ] {
-            assert!(parse_events(Agent::Claude, value).unwrap()[0]
-                .commands
-                .is_empty());
+            assert!(parse_events(value).unwrap()[0].commands.is_empty());
         }
     }
 
     #[test]
-    fn regex_matchers_keep_colons_and_round_trip_with_command_filters() {
+    fn regex_matchers_keep_colons_before_command_filters() {
         for (selection, matcher, commands) in [
             ("pretooluse:(?:Bash|Write)", "(?:Bash|Write)", vec![]),
             ("permission:(?:Bash|Write)", "(?:Bash|Write)", vec![]),
@@ -949,52 +741,26 @@ mod tests {
                 vec!["cargo test*"],
             ),
         ] {
-            let events = parse_events(Agent::Claude, selection).unwrap();
+            let events = parse_events(selection).unwrap();
             assert_eq!(events[0].matcher.as_deref(), Some(matcher), "{selection}");
             assert_eq!(events[0].commands, commands, "{selection}");
-            assert_eq!(
-                parse_events(Agent::Claude, &events[0].selector()).unwrap(),
-                events
-            );
         }
     }
 
     #[test]
-    fn conflicting_event_matchers_cannot_install_duplicate_actions() {
+    fn conflicting_event_matchers_are_rejected() {
         for value in [
             "posttooluse:Bash:cargo test*,posttooluse:Bash|Read:*test*",
             "pretooluse:Bash:git push*,pretooluse:Bash|Read:git *",
             "posttooluse,posttooluse:Bash:cargo test*",
         ] {
-            let error = parse_events(Agent::Claude, value).unwrap_err().to_string();
+            let error = parse_events(value).unwrap_err().to_string();
             assert!(error.contains("one matcher"), "{error}");
         }
-        // Direct callers of install must get the same check, before existing
-        // settings or hooks are changed.
-        let mut events = parse_events(Agent::Claude, "posttooluse:Bash:cargo test*").unwrap();
-        events.extend(parse_events(Agent::Claude, "posttooluse:Bash|Read:*test*").unwrap());
-        let mut settings =
-            json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}});
-        let original = settings.clone();
-        assert!(install(&mut settings, &events, |_| String::new(), 120).is_err());
-        assert_eq!(settings, original);
-
-        let combined = parse_events(
-            Agent::Claude,
-            "posttooluse:Bash|Read:cargo test*,posttooluse:Bash|Read:*test*",
-        )
-        .unwrap();
-        install(
-            &mut settings,
-            &combined,
-            |_| command("yappr", "/feed", Agent::Claude, None, 120),
-            120,
-        )
-        .unwrap();
-        assert_eq!(
-            settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
-            1
-        );
+        let combined =
+            parse_events("posttooluse:Bash|Read:cargo test*,posttooluse:Bash|Read:*test*").unwrap();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].commands, ["cargo test*", "*test*"]);
     }
 
     #[test]
@@ -1077,45 +843,41 @@ mod tests {
     }
 
     #[test]
-    fn install_preserves_filters_in_one_handler_per_event_and_matcher() {
-        let events = parse_events(
-            Agent::Claude,
-            "permission,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*",
-        )
-        .unwrap();
-        let mut settings = json!({});
-        install(
-            &mut settings,
-            &events,
-            |_| command("yappr", "/feed", Agent::Claude, None, 120),
-            120,
-        )
-        .unwrap();
-        let groups = settings["hooks"]["PostToolUse"].as_array().unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0]["matcher"], "Bash");
-        assert_eq!(groups[0]["hooks"][0]["timeout"], 30);
-        let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
-        assert!(
-            command
-                .contains("--events 'PostToolUse:Bash:cargo test*,PostToolUse:Bash:cargo build*'"),
-            "{command}"
-        );
-        assert!(
-            !settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap()
-                .contains("--events")
-        );
-        assert!(remove(&mut settings));
-        assert_eq!(settings, json!({}));
+    fn matchers_select_whole_tool_names() {
+        let events = parse_events("permission:Bash|Write,posttooluse:mcp__.*,stop").unwrap();
+        for (event, tool, matched) in [
+            ("PermissionRequest", Some("Bash"), true),
+            ("PermissionRequest", Some("Write"), true),
+            ("PermissionRequest", Some("BashOutput"), false),
+            ("PermissionRequest", None, false),
+            ("PostToolUse", Some("mcp__github__search"), true),
+            ("PostToolUse", Some("Bash"), false),
+            ("Stop", None, true),
+            ("PreToolUse", Some("Bash"), false),
+        ] {
+            let action = plan_selected(
+                Agent::Claude,
+                &input(json!({"hook_event_name": event, "tool_name": tool, "tool_input": {}})),
+                &events,
+            );
+            assert_eq!(action != Action::Nothing, matched, "{event}: {tool:?}");
+        }
+        assert!(parse_events("permission:(Bash").is_err());
     }
 
     #[test]
-    fn a_command_quotes_the_program_and_the_device() {
-        assert_eq!(
-            command("/example path/yappr", "/example/feed", Agent::Codex, Some("it's"), 150),
-            "'/example path/yappr' --dir '/example/feed' hook --agent codex --to 'it'\\''s' --timeout 150s"
-        );
+    fn events_that_an_agent_lacks_do_nothing_for_it() {
+        let events = parse_events("notification,posttoolusefailure").unwrap();
+        for event in ["Notification", "PostToolUseFailure"] {
+            let input = input(json!({"hook_event_name": event, "message": "x", "error": "x"}));
+            assert_eq!(
+                plan_selected(Agent::Codex, &input, &events),
+                Action::Nothing
+            );
+            assert_ne!(
+                plan_selected(Agent::Claude, &input, &events),
+                Action::Nothing
+            );
+        }
     }
 }

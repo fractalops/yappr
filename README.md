@@ -108,35 +108,49 @@ question expires, you cancel it, or an error occurs.
 
 ## Coding agents
 
-Yappr sends updates and approval requests from Claude Code and Codex to your phone.
+Yappr sends approval requests and updates from Claude Code and Codex to your phone.
+Install Yappr first, then install the yappr plugin for your agent.
+
+For Claude Code:
 
 ```sh
-# Install approval and turn-end hooks
-yappr hooks install claude
-yappr hooks install codex
-
-# Ask before pushing and send test results
-yappr hooks install claude \
-  --events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
-
-# Include subagent and session updates for this project
-yappr hooks install codex --scope project --events permission,stop,subagent,session
-
-# Remove Yappr hooks
-yappr hooks remove claude
-yappr hooks remove codex
+claude plugin marketplace add fractalops/yappr
+claude plugin install yappr@yappr
 ```
 
-The default events are `permission,stop`. `--events` replaces this selection.
+For Codex:
 
-> [!TIP]
-> `--events` accepts `event[:matcher[:command-pattern]]` entries.
-> Patterns use `*` for any text and `?` for one character. Repeat an event with
-> different patterns to match any of them. See [command filters](docs/reference.md#command-filters) for details.
+```sh
+codex plugin marketplace add fractalops/yappr
+codex plugin add yappr@yappr
+```
 
 > [!TIP]
 > Codex runs new hooks only after you trust them. Start Codex, type `/hooks`, and
-> trust the yappr hooks.
+> trust the yappr hooks. Do this again after each plugin update.
+
+The plugin asks the device that receives this feed to approve permission requests.
+When the agent finishes its turn, the plugin sends the agent's last message.
+Without an answer in time, the agent asks in the terminal as before.
+The plugin also gives the agent a skill to send updates and ask you questions.
+
+To change what the plugin does, use `yappr config`:
+
+```sh
+# Ask the phone, and wait 5 minutes for an answer
+yappr config --hook-to phone --hook-timeout 5m
+
+# Also ask before pushing, and send test results
+yappr config --hook-events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
+```
+
+The default events are `permission,stop`. `--hook-events` replaces this selection.
+In Claude Code, the plugin options replace these settings.
+
+> [!TIP]
+> `--hook-events` accepts `event[:matcher[:command-pattern]]` entries.
+> Patterns use `*` for any text and `?` for one character. Repeat an event with
+> different patterns to match any of them. See [command filters](docs/reference.md#command-filters) for details.
 
 Hook support in Yappr: ☑ supported, ☐ unsupported.
 

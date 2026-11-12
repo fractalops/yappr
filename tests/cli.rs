@@ -1410,6 +1410,7 @@ fn config_shows_and_saves_feed_settings() {
             "name": null,
             "relays": {"disabled": false, "urls": []},
             "mdns": true,
+            "hooks": {},
         })
     );
     assert!(writer.run(["config"]).contains("(computer name)"));
@@ -1429,9 +1430,10 @@ fn config_shows_and_saves_feed_settings() {
         "name": "Work Mac",
         "relays": {"disabled": false, "urls": ["https://relay.example.com", "https://relay2.example.com"]},
         "mdns": false,
+        "hooks": {},
     });
     assert_eq!(json(), custom);
-    assert_eq!(writer.run(["config"]), "Writer name: Work Mac\nRelays: https://relay.example.com, https://relay2.example.com\nLocal discovery: Off\n");
+    assert_eq!(writer.run(["config"]), "Writer name: Work Mac\nRelays: https://relay.example.com, https://relay2.example.com\nLocal discovery: Off\nAgent approvals go to: the one device that receives this feed\nAgent approvals wait: 2m\nAgent events: permission,stop\n");
 
     writer.fail(["config", "--relay", "file:///tmp", "--name", "Other"]);
     writer.fail(["--no-relay", "config", "--default-relays"]);
@@ -1458,7 +1460,7 @@ fn config_shows_and_saves_feed_settings() {
     assert!(json()["name"].is_null());
     assert!(writer.run(["config"]).contains("(computer name)"));
 
-    for command in ["network", "push"] {
+    for command in ["network", "push", "hooks"] {
         let (_, stderr) = writer.fail([command]);
         assert!(stderr.contains("unrecognized subcommand"), "{stderr}");
     }

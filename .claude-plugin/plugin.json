@@ -1,0 +1,46 @@
+{
+  "name": "yappr",
+  "description": "Approve agent tool requests and get turn updates on your phone with yappr.",
+  "author": {
+    "name": "fractalops"
+  },
+  "repository": "https://github.com/fractalops/yappr",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "approvals",
+    "notifications",
+    "hooks",
+    "phone"
+  ],
+  "hooks": "./hooks/claude.json",
+  "userConfig": {
+    "device": {
+      "type": "string",
+      "title": "Device",
+      "description": "The device that answers approvals. Empty: yappr config --hook-to, or the one device that receives the feed.",
+      "required": false,
+      "default": ""
+    },
+    "timeout": {
+      "type": "string",
+      "title": "Approval wait",
+      "description": "How long an approval waits, such as 5m. At most 59m. Empty: yappr config --hook-timeout, or 2m.",
+      "required": false,
+      "default": ""
+    },
+    "events": {
+      "type": "string",
+      "title": "Events",
+      "description": "Events such as permission,stop,pretooluse:Bash:git push*. Empty: yappr config --hook-events, or permission,stop.",
+      "required": false,
+      "default": ""
+    },
+    "feed": {
+      "type": "string",
+      "title": "Feed",
+      "description": "The local feed name. Empty: default.",
+      "required": false,
+      "default": ""
+    }
+  }
+}

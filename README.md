@@ -122,6 +122,14 @@ codex plugin add yappr@yappr
 
 Experimental: [agent hooks](docs/hooks-reference.md) send permission requests to your phone while you are away.
 
+```sh
+# Claude Code
+claude plugin install yappr-hooks@yappr
+
+# Codex, then trust the hooks in /hooks
+codex plugin add yappr-hooks@yappr
+```
+
 ## Reference
 
 The [CLI reference](docs/reference.md) covers command options, exit codes,

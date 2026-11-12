@@ -21,6 +21,8 @@ install-updater = false
 github-attestations = true
 # Run the tests on the tagged commit before the build
 plan-jobs = ["./ci"]
+# release.yml has one manual change: host waits for the checks to pass.
+allow-dirty = ["ci"]
 
 # GitHub retired the Apple Silicon macos-14 runner used by dist's defaults.
 [dist.github-custom-runners]

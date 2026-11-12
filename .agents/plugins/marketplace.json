@@ -1,0 +1,32 @@
+{
+  "name": "yappr",
+  "interface": {
+    "displayName": "yappr"
+  },
+  "plugins": [
+    {
+      "name": "yappr",
+      "source": {
+        "source": "local",
+        "path": "./plugins/yappr"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "yappr-hooks",
+      "source": {
+        "source": "local",
+        "path": "./plugins/yappr-hooks"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

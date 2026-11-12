@@ -1,0 +1,21 @@
+{
+  "name": "yappr",
+  "description": "Yappr plugins for coding agents.",
+  "owner": {
+    "name": "fractalops"
+  },
+  "plugins": [
+    {
+      "name": "yappr",
+      "source": "./plugins/yappr",
+      "description": "Lets the agent send updates and ask you questions on your phone with yappr.",
+      "category": "productivity"
+    },
+    {
+      "name": "yappr-hooks",
+      "source": "./plugins/yappr-hooks",
+      "description": "Experimental. Sends agent permission requests to your phone while you are away from the computer.",
+      "category": "productivity"
+    }
+  ]
+}

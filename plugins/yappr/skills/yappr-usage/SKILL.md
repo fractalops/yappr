@@ -14,19 +14,19 @@ Run these quietly:
 ```sh
 yappr --version
 yappr status --output text
-yappr hooks status
+yappr config
 ```
 
 Use Yappr 0.1.7 or later. If several installs exist, use the full path to the intended binary. Use the same feed for all commands in the task.
 
 For questions, use the alias of the intended peer with `yes` under "receives entries". If several peers qualify and the user has no preference on record, ask which one. A post goes to the feed, so every device that can read that feed can see it. Check that the feed is suitable for the content before posting.
 
-If the CLI or a receiving peer is missing, explain the setup. Install, pair, or change hooks only with the user's authorization.
+If the CLI or a receiving peer is missing, explain the setup. Install, pair, or change settings only with the user's authorization.
 
 - To install, see the [Yappr README](https://github.com/fractalops/yappr#install).
 - To pair, have the user run `yappr start --pair` in their terminal. On the phone, open [yappr.run](https://yappr.run/), select **Setup**, scan the code, and select **Request pairing**. Compare the two check codes. Enter `y` in the terminal if they match, or `n` if they differ. Use the alias printed after pairing.
 - Send a test post and check that it arrived. A paired receiver can receive while `yappr start` is stopped. Keep the receiver open for live updates and questions.
-- Hooks are optional. If the user asks to send tool permission prompts to the device, see [agent hooks](https://github.com/fractalops/yappr/blob/main/docs/reference.md#agent-hooks).
+- Agent hooks are experimental and come in a separate plugin, yappr-hooks. If the user asks to send tool permission prompts to the device, see [agent hooks](https://github.com/fractalops/yappr/blob/main/docs/hooks-reference.md).
 
 ## 2. Post updates
 
@@ -75,4 +75,4 @@ Do not ask only in the terminal. Do not block on `yappr ask` either, because the
 3. Apply one decision. `wait` prints the selected value and exits 0. A rejected `approve` exits 7. If the user answers in the chat, run `yappr cancel <id>` before acting. If Yappr already saved a device answer, read it with `yappr wait <id>`. Ask the user to resolve any conflict before acting.
 4. Exit 6 means the question expired, and 8 means it was cancelled. Silence is never approval: do not do the action. Post one `--level warn` entry that says what is on hold, say the same in the terminal, and stop.
 
-Agent hooks handle tool permission prompts.
+The separate yappr-hooks plugin handles tool permission prompts.

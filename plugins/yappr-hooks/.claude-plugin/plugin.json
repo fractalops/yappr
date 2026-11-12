@@ -1,6 +1,6 @@
 {
   "name": "yappr-hooks",
-  "version": "0.1.8",
+  "version": "0.1.9-rc.1",
   "description": "Experimental. Sends agent permission requests to your phone while you are away from the computer.",
   "author": {
     "name": "fractalops"

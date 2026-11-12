@@ -3,8 +3,8 @@
 > [!WARNING]
 > Agent hooks are experimental. Their behavior and settings can change in any release.
 
-The yappr-hooks plugin connects Claude Code and Codex to your phone.
-When you are away from the computer, the agent asks your phone for permission, and your phone shows when the agent finishes.
+The yappr-hooks plugin connects Claude Code and Codex to your other device, such as your phone.
+When you are away from the computer, you approve or reject the agent's permission requests on your other device. The device also shows when the agent finishes.
 When you are at the computer, the plugin does nothing. The agent works as it does without the plugin.
 
 yappr-hooks is separate from the yappr plugin. The yappr plugin has no hooks. It lets the agent send updates and ask questions when the agent decides to.
@@ -12,7 +12,7 @@ You can install one plugin, or both.
 
 ## Install
 
-Install Yappr and pair your phone first. See the [README](../README.md).
+Install Yappr and pair your other device first. See the [README](../README.md).
 
 For Claude Code:
 
@@ -32,7 +32,7 @@ Codex runs new hooks only after you trust them. Start Codex and type `/hooks`. T
 Do this again after each plugin update.
 
 If you used an older Yappr that wrote hooks into `~/.claude/settings.json` or `~/.codex/hooks.json`, remove those hooks.
-Otherwise, each request goes to your phone two times.
+Otherwise, each request goes to your other device two times.
 
 To remove the hooks, remove the plugin: `claude plugin uninstall yappr-hooks@yappr` or `codex plugin remove yappr-hooks@yappr`.
 
@@ -47,8 +47,8 @@ The plugin runs `yappr hook` at each of these points. Yappr then asks three ques
    If you are at the computer, Yappr stops and the agent continues as usual.
    If Yappr cannot tell, it acts as if you are at the computer.
 3. **What does the event need?**
-   - The agent finished: Yappr shows the last message of the agent on your phone. The agent does not wait.
-   - The agent needs permission: Yappr sends the request to your phone and waits for your answer.
+   - The agent finished: Yappr shows the last message of the agent on your other device. The agent does not wait.
+   - The agent needs permission: Yappr sends the request to your other device and waits for your answer.
 
 A permission request has four possible results:
 
@@ -57,11 +57,11 @@ A permission request has four possible results:
 | You tap **Approve** | The tool runs. |
 | You tap **Reject** | The agent gets a refusal. |
 | No answer in 2 minutes | The agent shows its usual terminal prompt. |
-| You come back to the computer | Yappr cancels the request on your phone. The agent shows its usual terminal prompt. |
+| You come back to the computer | Yappr cancels the request on your other device. The agent shows its usual terminal prompt. |
 
 Yappr checks every 3 seconds whether you came back.
 
-## What you see on your phone
+## What you see on your other device
 
 - **A request**, such as "Claude asks to use Bash in yappr", with the command. It has **Approve** and **Reject** buttons.
 - **A card for each agent and project**, such as "Claude finished in yappr", with the last message of the agent.
@@ -71,10 +71,10 @@ You can also select tool steps for the card. See [Events](#events).
 
 ## When something fails
 
-The plugin never stops the agent. If Yappr is not installed, cannot reach your phone, or has an error, the agent continues as if the plugin is not there.
+The plugin never stops the agent. If Yappr is not installed, cannot reach your other device, or has an error, the agent continues as if the plugin is not there.
 
 - If Yappr is not installed, the plugin writes an install hint to stderr. Codex shows the hint as a warning.
-- If your phone is not reachable, the entry stays in the feed. `yappr start` or `yappr retry` delivers it later.
+- If your other device is not reachable, the entry stays in the feed. `yappr start` or `yappr retry` delivers it later.
 - Errors go to stderr. In Claude Code, start the agent with `--debug-file FILE` to see them.
 
 ## Change what the plugin does
@@ -82,7 +82,7 @@ The plugin never stops the agent. If Yappr is not installed, cannot reach your p
 Use `yappr config`:
 
 ```sh
-# Ask the phone, and wait 5 minutes for an answer
+# Ask the device named phone, and wait 5 minutes for an answer
 yappr config --hook-to phone --hook-timeout 5m
 
 # Also act when you are at the computer

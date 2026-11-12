@@ -35,6 +35,13 @@
       "required": false,
       "default": ""
     },
+    "when": {
+      "type": "string",
+      "title": "When",
+      "description": "away: act only when the screen is locked or the computer was idle for 2 minutes. always: act on every selected event. Empty: yappr config --hook-when, or away.",
+      "required": false,
+      "default": ""
+    },
     "feed": {
       "type": "string",
       "title": "Feed",

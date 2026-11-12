@@ -104,36 +104,6 @@
           }
         ]
       }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/yappr-hook",
-              "claude"
-            ],
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/yappr-hook",
-              "claude"
-            ],
-            "timeout": 30
-          }
-        ]
-      }
     ]
   }
 }

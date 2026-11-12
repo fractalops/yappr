@@ -7,6 +7,7 @@ mod devices;
 mod feed;
 mod hooks;
 mod pairing;
+mod presence;
 mod qr;
 mod questions;
 mod writer;

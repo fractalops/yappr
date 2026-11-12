@@ -745,6 +745,7 @@ async fn yappr_hook(
         .args(args)
         .env("YAPPR_DIR", dir)
         .env("YAPPR_NETWORK", "local")
+        .env("YAPPR_PRESENCE", "away")
         .env("CLAUDE_CONFIG_DIR", home.join("claude"))
         .env("CODEX_HOME", home.join("codex"))
         .env_remove("IROH_SECRET")
@@ -803,6 +804,7 @@ async fn plugin_hook(
         .env("YAPPR_BIN", env!("CARGO_BIN_EXE_yappr"))
         .env("YAPPR_DIR", dir)
         .env("YAPPR_NETWORK", "local")
+        .env("YAPPR_PRESENCE", "away")
         .env_remove("YAPPR_FEED")
         .env_remove("IROH_SECRET")
         .env_remove("YAPPR_KEY")
@@ -863,7 +865,8 @@ async fn filtered_hooks_skip_unmatched_commands_and_post_results_for_both_agents
         assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
         let entries = Store::open(dir.path()).unwrap().entries().unwrap();
         let entry = entries.last().unwrap();
-        assert_eq!(entry.kind, format!("{agent}.tool"));
+        assert_eq!(entry.kind, "state");
+        assert_eq!(entry.subject.as_deref(), Some(agent));
         assert!(entry.body.contains("cargo test --release"));
         assert!(entry.body.contains(if agent == "claude" {
             "2 passed"
@@ -889,7 +892,11 @@ async fn filtered_hooks_skip_unmatched_commands_and_post_results_for_both_agents
     assert!(out.stdout.is_empty() && out.stderr.is_empty());
     let entries = Store::open(dir.path()).unwrap().entries().unwrap();
     assert_eq!(entries.len(), 3);
-    assert_eq!(entries[2].kind, "claude.tool_failure");
+    assert_eq!(entries[2].kind, "state");
+    // The failure is the second step on the card of Claude.
+    assert!(entries[2]
+        .body
+        .starts_with("- `Bash` · `cargo test --release`\n- `Bash` failed · `cargo test`"));
     assert!(entries[2].body.contains("Exit code 1: test failed"));
 }
 
@@ -948,7 +955,7 @@ async fn configured_command_filters_deliver_results_and_keep_pretool_approvals()
             n,
             "overlapping filters sent duplicate updates"
         );
-        assert_eq!(entries[n - 1].kind, "claude.tool");
+        assert_eq!(entries[n - 1].kind, "state");
         assert!(entries[n - 1].body.contains(command));
     }
     let path = dir.path().to_owned();
@@ -998,12 +1005,12 @@ async fn plugin_options_replace_the_saved_settings_and_empty_options_keep_them()
     )
     .await;
     assert!(out.status.success(), "{out:?}");
-    let input = r#"{"hook_event_name":"SessionStart","cwd":"/work/app"}"#;
-    // The saved events have no session event.
+    let input = r#"{"hook_event_name":"SubagentStop","cwd":"/work/app"}"#;
+    // The saved events have no subagent event.
     let out = plugin_hook(
         dir.path(),
         "claude",
-        "SessionStart",
+        "SubagentStop",
         input,
         &[("CLAUDE_PLUGIN_OPTION_EVENTS", "")],
     )
@@ -1014,20 +1021,23 @@ async fn plugin_options_replace_the_saved_settings_and_empty_options_keep_them()
     let out = plugin_hook(
         dir.path(),
         "claude",
-        "SessionStart",
+        "SubagentStop",
         input,
-        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "session")],
+        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "subagent")],
     )
     .await;
     assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
     let entries = Store::open(dir.path()).unwrap().entries().unwrap();
-    assert_eq!(entries.last().unwrap().kind, "claude.session");
+    assert_eq!(
+        entries.last().unwrap().title.as_deref(),
+        Some("Claude: a subagent finished")
+    );
     let out = plugin_hook(
         dir.path(),
         "codex",
-        "SessionStart",
+        "SubagentStop",
         input,
-        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "session")],
+        &[("CLAUDE_PLUGIN_OPTION_EVENTS", "subagent")],
     )
     .await;
     assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
@@ -1065,14 +1075,14 @@ async fn config_saves_and_clears_the_hook_settings() {
         "--hook-timeout",
         "5m",
         "--hook-events",
-        "permission,session",
+        "permission,subagent",
     ])
     .await;
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("Agent approvals go to: phone"), "{text}");
     assert!(text.contains("Agent approvals wait: 5m"), "{text}");
-    assert!(text.contains("Agent events: permission,session"), "{text}");
+    assert!(text.contains("Agent events: permission,subagent"), "{text}");
     for invalid in [
         vec!["config", "--hook-to", "tablet"],
         vec!["config", "--hook-timeout", "2h"],
@@ -1109,8 +1119,6 @@ fn plugin_hook_files_cover_every_event_and_outlast_the_wait() {
         "Notification",
         "Stop",
         "SubagentStop",
-        "SessionStart",
-        "SessionEnd",
     ];
     for agent in ["claude", "codex"] {
         let hooks: serde_json::Value = serde_json::from_slice(
@@ -1132,7 +1140,6 @@ fn plugin_hook_files_cover_every_event_and_outlast_the_wait() {
             );
             let wanted = match (agent, event) {
                 (_, "PermissionRequest" | "PreToolUse") => yappr::hooks::ASK_HOOK_TIMEOUT,
-                ("codex", "SessionEnd") => 3,
                 _ => 30,
             };
             assert_eq!(handler["timeout"], wanted, "{agent} {event}");
@@ -1232,9 +1239,9 @@ async fn a_permission_request_waits_for_the_device_and_returns_its_decision() {
             .await
         });
         let entry = device.wait_for(n * 2 - 1).await.remove(n * 2 - 2);
-        assert_eq!(entry.title.as_deref(), Some("Claude: Bash"));
+        assert_eq!(entry.title.as_deref(), Some("Claude asks to use Bash"));
         assert_eq!(entry.body, "rm -rf build");
-        assert_eq!(entry.subject.as_deref(), Some("project/app"));
+        assert_eq!(entry.subject.as_deref(), Some("claude/app"));
         let question = choices::question(&entry).unwrap();
         let conn = device.last.borrow().clone().unwrap();
         let _: control::Reply = control::exchange_on(
@@ -1276,7 +1283,7 @@ async fn other_events_post_and_failures_never_block_the_agent() {
     let entry = device.wait_for(1).await.remove(0);
     assert_eq!(
         (entry.kind.as_str(), entry.title.as_deref()),
-        ("codex.stop", Some("Codex finished"))
+        ("state", Some("Codex finished"))
     );
     assert_eq!(entry.body, "All tests pass.");
 
@@ -1323,4 +1330,129 @@ async fn a_post_hook_does_not_wait_for_a_device_that_is_not_reachable() {
     let read = yappr(dir.path(), &["status", "--output", "json"]).await;
     let status: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
     assert_eq!(status["feed"]["entries"], 1, "{status}");
+}
+
+#[tokio::test]
+async fn at_the_computer_the_hooks_stay_quiet_unless_set_to_always() {
+    let (dir, _device) = cli_writer().await;
+    let ask = r#"{"hook_event_name":"PermissionRequest","cwd":"/work/app","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    let stop = r#"{"hook_event_name":"Stop","cwd":"/work/app","last_assistant_message":"Done."}"#;
+    for input in [ask, stop] {
+        let out = plugin_hook(
+            dir.path(),
+            "claude",
+            "Stop",
+            input,
+            &[("YAPPR_PRESENCE", "here")],
+        )
+        .await;
+        assert!(
+            out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+            "{out:?}"
+        );
+    }
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 0);
+    let home = tempfile::tempdir().unwrap();
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &["config", "--hook-when", "always"],
+        "",
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Agent hooks act: always"));
+    let out = plugin_hook(
+        dir.path(),
+        "claude",
+        "Stop",
+        stop,
+        &[("YAPPR_PRESENCE", "here")],
+    )
+    .await;
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 1);
+    // A plugin option replaces the saved setting.
+    let out = plugin_hook(
+        dir.path(),
+        "claude",
+        "Stop",
+        stop,
+        &[
+            ("YAPPR_PRESENCE", "here"),
+            ("CLAUDE_PLUGIN_OPTION_WHEN", "away"),
+        ],
+    )
+    .await;
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert_eq!(Store::open(dir.path()).unwrap().last_id().unwrap(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tool_steps_collect_on_one_card_until_the_turn_ends() {
+    let (dir, _device) = cli_writer().await;
+    let home = tempfile::tempdir().unwrap();
+    let out = yappr_hook(
+        dir.path(),
+        home.path(),
+        &["config", "--hook-events", "posttooluse,stop"],
+        "",
+    )
+    .await;
+    assert!(out.status.success(), "{out:?}");
+    for n in 1..=7 {
+        let input = serde_json::json!({"hook_event_name": "PostToolUse", "cwd": "/work/app", "tool_name": "Bash",
+            "tool_input": {"command": format!("step {n}")}, "tool_response": "ok"}).to_string();
+        let out = plugin_hook(dir.path(), "claude", "PostToolUse", &input, &[]).await;
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    }
+    // Another project has a card of its own.
+    let other = r#"{"hook_event_name":"PostToolUse","cwd":"/work/site","tool_name":"Read","tool_input":{"file_path":"/work/site/a"}}"#;
+    plugin_hook(dir.path(), "claude", "PostToolUse", other, &[]).await;
+    let entries = Store::open(dir.path()).unwrap().entries().unwrap();
+    let card = &entries[6];
+    assert_eq!(
+        (
+            card.kind.as_str(),
+            card.subject.as_deref(),
+            card.title.as_deref()
+        ),
+        ("state", Some("claude/app"), Some("Claude is working"))
+    );
+    assert_eq!(card.format.as_deref(), Some("markdown"));
+    let steps: Vec<&str> = card
+        .body
+        .lines()
+        .take_while(|l| l.starts_with("- "))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "- `Bash` · `step 3`",
+            "- `Bash` · `step 4`",
+            "- `Bash` · `step 5`",
+            "- `Bash` · `step 6`",
+            "- `Bash` · `step 7`"
+        ]
+    );
+    assert!(
+        card.body.contains("Last result:\n```\nok\n```"),
+        "{}",
+        card.body
+    );
+    assert_eq!(entries[7].subject.as_deref(), Some("claude/site"));
+    assert!(entries[7].body.starts_with("- `Read` · `a`"));
+
+    let stop =
+        r#"{"hook_event_name":"Stop","cwd":"/work/app","last_assistant_message":"All done."}"#;
+    plugin_hook(dir.path(), "claude", "Stop", stop, &[]).await;
+    let input = r#"{"hook_event_name":"PostToolUse","cwd":"/work/app","tool_name":"Bash","tool_input":{"command":"next"}}"#;
+    plugin_hook(dir.path(), "claude", "PostToolUse", input, &[]).await;
+    let entries = Store::open(dir.path()).unwrap().entries().unwrap();
+    assert_eq!(
+        (entries[8].title.as_deref(), entries[8].body.as_str()),
+        (Some("Claude finished"), "All done.")
+    );
+    assert_eq!(entries[9].body, "- `Bash` · `next`");
 }

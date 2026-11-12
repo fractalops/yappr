@@ -129,8 +129,13 @@ codex plugin add yappr@yappr
 > Codex runs new hooks only after you trust them. Start Codex and type `/hooks`.
 > Trust the Yappr hooks when Codex asks for review.
 
-The plugin asks the device that receives this feed to approve permission requests.
-When the agent finishes its turn, the plugin sends the agent's last message.
+The plugin acts only when you are away from the computer. You are away when you
+lock the screen, or after 2 minutes with no keyboard or mouse input. At the computer, the agent
+asks in the terminal as usual, and nothing goes to your phone.
+
+When you are away, the plugin asks the device that receives this feed to approve
+permission requests. Each agent has one card per project on your phone. The card
+shows what the agent did, and the agent's last message when its turn ends.
 Without an answer in time, the agent uses its normal terminal prompt.
 Claude Code can show that prompt while Yappr waits.
 The plugin also gives the agent a skill to send updates and ask you questions.
@@ -141,8 +146,11 @@ To change what the plugin does, use `yappr config`:
 # Ask the phone, and wait 5 minutes for an answer
 yappr config --hook-to phone --hook-timeout 5m
 
-# Also ask before pushing, and send test results
+# Also ask before pushing, and show test results on the card
 yappr config --hook-events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
+
+# Act also when you are at the computer
+yappr config --hook-when always
 ```
 
 The default events are `permission,stop`. `--hook-events` replaces this selection.
@@ -158,13 +166,12 @@ Hook support in Yappr: ☑ supported, ☐ unsupported.
 | Hook | Agent | What Yappr does |
 |---|---|---|
 | ☑ `PermissionRequest` | Claude Code, Codex | Shows an approval request on your phone and returns your decision to the agent |
-| ☑ `Stop` | Claude Code, Codex | Sends the agent's last message when its turn ends |
+| ☑ `Stop` | Claude Code, Codex | Shows the agent's last message on its card when its turn ends |
 | ☑ `PreToolUse` | Claude Code, Codex | Asks for approval before each matching tool runs |
 | ☑ `Notification` | Claude Code | Sends the agent's notification message to your phone |
-| ☑ `SubagentStop` | Claude Code, Codex | Sends an update when a subagent finishes |
-| ☑ `SessionStart`, `SessionEnd` | Claude Code, Codex | Sends an update when a session starts or ends |
-| ☑ `PostToolUse` | Claude Code, Codex | Sends a completion update with the tool name and a result summary |
-| ☑ `PostToolUseFailure` | Claude Code | Sends an update with the tool name and error when a tool fails |
+| ☑ `SubagentStop` | Claude Code, Codex | Shows the subagent's last message on the card |
+| ☑ `PostToolUse` | Claude Code, Codex | Adds the tool and its main argument to the card, with the command output |
+| ☑ `PostToolUseFailure` | Claude Code | Adds the failed tool and its error to the card |
 
 ## Reference
 

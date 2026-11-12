@@ -10,7 +10,7 @@ use jiff::Timestamp;
 use tokio::time::timeout;
 use yappr::{
     choices::{self, QuestionStatus},
-    config::{FeedConfig, HookSettings},
+    config::{FeedConfig, HookSettings, HookWhen},
     entry::{self, Draft},
     hooks::{self as agent_hooks, Selected},
     peers,
@@ -107,6 +107,11 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
     if action == Action::Nothing {
         return Ok(None);
     }
+    if settings.when == HookWhen::Away
+        && super::presence::presence() == super::presence::Presence::Here
+    {
+        return Ok(None);
+    }
     let store = common.store()?;
     match action {
         Action::Nothing => Ok(None),
@@ -120,7 +125,7 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                 source: args.agent.name().into(),
                 kind,
                 level: None,
-                subject,
+                subject: Some(subject),
                 title: Some(title),
                 body,
                 format: None,
@@ -129,6 +134,17 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
             })?;
             // The agent waits for the hook. A device that is not reachable
             // must not stop the agent, so deliver in another process.
+            deliver_later(&store, args.agent, entry.id)?;
+            Ok(None)
+        }
+        Action::Activity {
+            title,
+            step,
+            detail,
+            subject,
+        } => {
+            let entry =
+                store.append(activity(&store, args.agent, title, step, detail, subject)?)?;
             deliver_later(&store, args.agent, entry.id)?;
             Ok(None)
         }
@@ -158,7 +174,7 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
                 true,
             );
             let details = entry::Details {
-                subject,
+                subject: Some(subject),
                 ..Default::default()
             };
             let question = choices::create_with(&store, question, details)?;
@@ -186,9 +202,64 @@ async fn run_hook(common: &CommonArgs, args: HookArgs) -> Result<Option<serde_js
     }
 }
 
+/// The most recent steps on an activity card.
+const STEPS: usize = 5;
+
+/// The next activity card of `agent` for `subject`. A step adds to the steps
+/// of the last card, and a card without a step starts again.
+fn activity(
+    store: &Store,
+    agent: agent_hooks::Agent,
+    title: String,
+    step: Option<String>,
+    detail: String,
+    subject: String,
+) -> Result<Draft> {
+    let mut steps: Vec<serde_json::Value> = Vec::new();
+    if let Some(step) = step {
+        let last = store.entries()?.into_iter().rev().find(|e| {
+            e.kind == "state" && e.source == agent.name() && e.subject.as_deref() == Some(&subject)
+        });
+        if let Some(Some(serde_json::Value::Array(old))) =
+            last.map(|e| e.data.as_ref().and_then(|d| d.get("steps")).cloned())
+        {
+            steps = old;
+        }
+        steps.push(step.into());
+        let extra = steps.len().saturating_sub(STEPS);
+        steps.drain(..extra);
+    }
+    let mut body = steps
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|s| format!("- {s}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !detail.is_empty() {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&detail);
+    }
+    let mut data = serde_json::Map::new();
+    data.insert("steps".into(), steps.into());
+    Ok(Draft {
+        source: agent.name().into(),
+        kind: "state".into(),
+        level: None,
+        subject: Some(subject),
+        title: Some(title),
+        body,
+        format: Some("markdown".into()),
+        data: Some(data),
+        extra: Default::default(),
+    })
+}
+
 /// The hook settings of one run. A flag comes first, then the environment
 /// that the plugin sets, then `yappr config`.
 struct Settings {
+    when: HookWhen,
     to: Option<String>,
     wait: Duration,
     events: Vec<Selected>,
@@ -227,7 +298,13 @@ impl Settings {
             Some(text) => agent_hooks::parse_events(&text)?,
             None => agent_hooks::default_events(),
         };
+        let when = match env_setting("YAPPR_HOOK_WHEN") {
+            Some(text) => <HookWhen as clap::ValueEnum>::from_str(&text, true)
+                .map_err(|_| anyhow::anyhow!("YAPPR_HOOK_WHEN: use away or always"))?,
+            None => saved.when.unwrap_or_default(),
+        };
         Ok(Self {
+            when,
             to,
             wait: wait.min(agent_hooks::MAX_WAIT),
             events,

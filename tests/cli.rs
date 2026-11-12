@@ -1433,7 +1433,7 @@ fn config_shows_and_saves_feed_settings() {
         "hooks": {},
     });
     assert_eq!(json(), custom);
-    assert_eq!(writer.run(["config"]), "Writer name: Work Mac\nRelays: https://relay.example.com, https://relay2.example.com\nLocal discovery: Off\nAgent approvals go to: the one device that receives this feed\nAgent approvals wait: 2m\nAgent events: permission,stop\n");
+    assert_eq!(writer.run(["config"]), "Writer name: Work Mac\nRelays: https://relay.example.com, https://relay2.example.com\nLocal discovery: Off\nAgent approvals go to: the one device that receives this feed\nAgent approvals wait: 2m\nAgent events: permission,stop\nAgent hooks act: when you are away (screen locked, or idle for 2 minutes)\n");
 
     writer.fail(["config", "--relay", "file:///tmp", "--name", "Other"]);
     writer.fail(["--no-relay", "config", "--default-relays"]);

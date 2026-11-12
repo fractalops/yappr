@@ -29,6 +29,21 @@ pub struct HookSettings {
     /// The selected events, as `event[:matcher[:command-pattern]]` entries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub events: Option<String>,
+    /// When the hooks act. The default is [`HookWhen::Away`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub when: Option<HookWhen>,
+}
+
+/// When the agent hooks ask a device and post updates.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum HookWhen {
+    /// Only when the screen is locked or the computer is idle. At the
+    /// computer, the agent asks in the terminal.
+    #[default]
+    Away,
+    /// For every selected event.
+    Always,
 }
 
 impl Default for FeedConfig {

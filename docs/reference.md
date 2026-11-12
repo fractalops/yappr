@@ -247,20 +247,28 @@ The [README](../README.md#coding-agents) shows how to install them.
 ```sh
 yappr config --hook-to phone --hook-timeout 5m
 yappr config --hook-events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
+yappr config --hook-when always
 yappr config --hook-to "" --hook-timeout "" --hook-events ""
 ```
+
+By default, the hooks act only when you are away: the screen is locked, or there was no keyboard or mouse input for 2 minutes.
+At the computer, a hook gives no decision and posts nothing, so the agent asks in the terminal.
+On macOS, Yappr reads the idle time and the lock state from `ioreg`. On Linux, it reads `LockedHint` and `IdleHint` of the graphical session from `loginctl`.
+`IdleHint` uses the idle time of the desktop, which can be longer than 2 minutes.
+Without a graphical session, such as over SSH, and on Windows, the hooks act for every selected event.
+`--hook-when always` makes the hooks act at the computer too.
 
 `--hook-to DEVICE` selects the device that answers. Without it, the hook asks the one device that receives the feed.
 If several devices can answer, set `--hook-to`.
 `--hook-timeout DURATION` sets how long a request waits. Default: `2m`. Maximum: `59m`.
 An empty value restores the default.
 
-In Claude Code, the plugin options **Device**, **Approval wait**, **Events**, and **Feed** replace these settings.
+In Claude Code, the plugin options **Device**, **Approval wait**, **Events**, **When**, and **Feed** replace these settings.
 An empty option keeps the setting of `yappr config`.
 Run `claude plugin configure yappr@yappr` to list the options.
 In Claude Code, use `/plugin configure yappr@yappr` to set them.
 Restart Claude Code to apply changes.
-The hook also reads `YAPPR_HOOK_TO`, `YAPPR_HOOK_TIMEOUT`, `YAPPR_HOOK_EVENTS`, and `YAPPR_FEED`.
+The hook also reads `YAPPR_HOOK_TO`, `YAPPR_HOOK_TIMEOUT`, `YAPPR_HOOK_EVENTS`, `YAPPR_HOOK_WHEN`, and `YAPPR_FEED`.
 
 The plugin finds `yappr` on `PATH`, then in `~/.cargo/bin`. `YAPPR_BIN` replaces this search.
 If it cannot find `yappr`, it writes an install hint to stderr and gives no decision.
@@ -277,19 +285,24 @@ A shared server can use a different environment or version from the CLI.
 |---|---|---|
 | `permission` | `PermissionRequest` | Asks for approval and gives the decision to the agent |
 | `pretooluse:TOOL` | `PreToolUse` for a tool, such as `Bash` | Asks for approval before each matching tool runs |
-| `posttooluse[:TOOL]` | `PostToolUse` | Posts `AGENT.tool` with the tool input and result |
-| `posttoolusefailure[:TOOL]` | `PostToolUseFailure`, Claude Code only | Posts `claude.tool_failure` with the tool input and error |
-| `stop` | `Stop` | Posts `AGENT.stop` with the last message of the agent |
-| `subagent` | `SubagentStop` | Posts `AGENT.subagent` |
+| `posttooluse[:TOOL]` | `PostToolUse` | Adds a step to the activity card, with the command output |
+| `posttoolusefailure[:TOOL]` | `PostToolUseFailure`, Claude Code only | Adds a failed step to the activity card, with the error |
+| `stop` | `Stop` | Shows the last message of the agent on the activity card |
+| `subagent` | `SubagentStop` | Shows the last message of the subagent on the activity card |
 | `notification` | `Notification`, Claude Code only | Posts `claude.notification`. It repeats permission requests and stops |
-| `session` | `SessionStart`, `SessionEnd` | Posts `AGENT.session` |
+
+The activity card is a `state` entry with the subject `AGENT/PROJECT`, such as `claude/yappr`. PROJECT is the name of the working directory.
+The app shows only the newest `state` entry of a subject, so each agent has one card per project.
+The card lists the last 5 steps: the tool and its main argument, such as the command or a path in the project.
+Below the steps, it shows the stdout and stderr of the last command, up to 2 KiB. It does not show other results, such as the content of a file that the tool read.
+After a stop, the next step starts a new list.
 
 A request shows the tool and its command on the device. Approval allows the tool, and rejection denies it.
 With no answer before the timeout, the hook gives no decision. The agent applies its normal permission rules.
 Claude Code can show its terminal prompt while Yappr waits. The prompt remains available after the timeout.
 A hook always exits 0 and writes errors to stderr. An error never blocks the agent.
 
-A post hook saves the entry and returns. Another process delivers it. If no device is reachable, `start` or `retry` delivers it later.
+A hook that posts saves the entry and returns. Another process delivers it. If no device is reachable, `start` or `retry` delivers it later.
 Bodies longer than 8 KiB are cut.
 
 Hook input is limited to 1 MiB. Larger events can fail decoding and produce no question or update.
@@ -333,8 +346,7 @@ The next unescaped colon outside groups and classes starts the command pattern.
 Further colons stay in the command pattern, so URLs and drive paths work.
 Commas separate event entries and cannot appear inside a matcher or command pattern. Each command pattern can contain at most 4096 bytes.
 
-`PostToolUse` sends a completion update with the tool input and result. Structured results use JSON.
-Tool input is limited to 2 KiB to leave room for the result within the 8 KiB body limit.
+`PostToolUse` adds a step to the activity card.
 Claude Code uses `PostToolUseFailure` for tool failures. Codex also reports unsuccessful Bash commands through `PostToolUse`.
 Yappr preserves the reported result and does not infer an exit code when the agent provides none.
 

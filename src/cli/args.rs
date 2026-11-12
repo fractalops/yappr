@@ -418,11 +418,18 @@ pub(super) struct HookConfigArgs {
     /// separated by commas. Default: permission,stop.
     #[clap(long, value_name = "EVENTS")]
     pub(super) hook_events: Option<String>,
+    /// When agent hooks act. away: only when the screen is locked or the
+    /// computer was idle for 2 minutes. Default: away.
+    #[clap(long, value_enum, value_name = "WHEN")]
+    pub(super) hook_when: Option<yappr::config::HookWhen>,
 }
 
 impl HookConfigArgs {
     pub(super) fn any(&self) -> bool {
-        self.hook_to.is_some() || self.hook_timeout.is_some() || self.hook_events.is_some()
+        self.hook_to.is_some()
+            || self.hook_timeout.is_some()
+            || self.hook_events.is_some()
+            || self.hook_when.is_some()
     }
 }
 

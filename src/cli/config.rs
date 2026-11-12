@@ -100,6 +100,14 @@ pub(super) fn run(
                 "Agent events: {}",
                 hooks.events.as_deref().unwrap_or("permission,stop")
             );
+            println!(
+                "Agent hooks act: {}",
+                match hooks.when.unwrap_or_default() {
+                    yappr::config::HookWhen::Away =>
+                        "when you are away (screen locked, or idle for 2 minutes)",
+                    yappr::config::HookWhen::Always => "always",
+                }
+            );
         }
     }
     Ok(())
@@ -132,6 +140,9 @@ fn update_hooks(
             }
             None => None,
         };
+    }
+    if let Some(when) = args.hook_when {
+        settings.when = Some(when);
     }
     if let Some(events) = set(args.hook_events) {
         if let Some(text) = &events {

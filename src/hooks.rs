@@ -58,8 +58,6 @@ pub enum Event {
     Notification,
     /// The agent finished its turn.
     Stop,
-    SessionStart,
-    SessionEnd,
     SubagentStop,
 }
 
@@ -72,8 +70,6 @@ impl Event {
             Event::PostToolUseFailure => "PostToolUseFailure",
             Event::Notification => "Notification",
             Event::Stop => "Stop",
-            Event::SessionStart => "SessionStart",
-            Event::SessionEnd => "SessionEnd",
             Event::SubagentStop => "SubagentStop",
         }
     }
@@ -107,15 +103,13 @@ pub const MAX_WAIT: Duration = Duration::from_secs(ASK_HOOK_TIMEOUT - 60);
 /// The wait for an answer when the settings give none.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(120);
 
-const ALL: [Event; 9] = [
+const ALL: [Event; 7] = [
     Event::PermissionRequest,
     Event::PreToolUse,
     Event::PostToolUse,
     Event::PostToolUseFailure,
     Event::Notification,
     Event::Stop,
-    Event::SessionStart,
-    Event::SessionEnd,
     Event::SubagentStop,
 ];
 
@@ -166,12 +160,9 @@ pub fn parse_events(text: &str) -> Result<Vec<Selected>> {
             "posttoolusefailure" => vec![Event::PostToolUseFailure],
             "notification" => vec![Event::Notification],
             "stop" => vec![Event::Stop],
-            "session" => vec![Event::SessionStart, Event::SessionEnd],
-            "sessionstart" => vec![Event::SessionStart],
-            "sessionend" => vec![Event::SessionEnd],
             "subagent" | "subagentstop" => vec![Event::SubagentStop],
             other => bail!(
-                "unknown event {other:?}. Use permission, pretooluse:TOOL, posttooluse, posttoolusefailure, notification, stop, session, or subagent"
+                "unknown event {other:?}. Use permission, pretooluse:TOOL, posttooluse, posttoolusefailure, notification, stop, or subagent"
             ),
         };
         if let Some(matcher) = matcher {
@@ -301,14 +292,24 @@ pub enum Action {
         event: Event,
         title: String,
         body: String,
-        subject: Option<String>,
+        subject: String,
     },
-    /// Post an entry. The agent gets no decision.
+    /// Update the activity card of the agent for this project: one `state`
+    /// entry per subject, which replaces the earlier one in the app.
+    Activity {
+        title: String,
+        /// One line for the list of recent steps. None starts a new list.
+        step: Option<String>,
+        /// Markdown below the steps, such as a result or the last message.
+        detail: String,
+        subject: String,
+    },
+    /// Post an entry of its own. The agent gets no decision.
     Post {
         kind: String,
         title: String,
         body: String,
-        subject: Option<String>,
+        subject: String,
     },
     /// Nothing to do for this event.
     Nothing,
@@ -327,46 +328,44 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
     if !event.supported(agent) {
         return Action::Nothing;
     }
-    let subject = input.cwd.as_deref().map(subject_of);
+    let subject = subject_of(agent, input.cwd.as_deref());
     let name = agent.title();
+    let tool = input.tool_name.as_deref().unwrap_or("a tool");
     match event {
-        Event::PermissionRequest | Event::PreToolUse => {
-            let tool = input.tool_name.as_deref().unwrap_or("a tool");
-            Action::Ask {
-                event,
-                title: one_line(&format!("{name}: {tool}"), MAX_TITLE),
-                body: text(&describe(input.tool_input.as_ref())),
-                subject,
-            }
-        }
+        Event::PermissionRequest | Event::PreToolUse => Action::Ask {
+            event,
+            title: one_line(&format!("{name} asks to use {tool}"), MAX_TITLE),
+            body: text(&describe(input.tool_input.as_ref())),
+            subject,
+        },
         Event::PostToolUse | Event::PostToolUseFailure => {
-            let tool = input.tool_name.as_deref().unwrap_or("a tool");
             let failed = event == Event::PostToolUseFailure;
-            let result = match (&input.error, &input.tool_response) {
-                (Some(error), _) => error.clone(),
-                (_, Some(Value::String(result))) => result.clone(),
-                (_, Some(result)) if !result.is_null() => {
-                    serde_json::to_string_pretty(result).unwrap_or_default()
-                }
-                _ => "No result was provided.".into(),
+            let result = match &input.error {
+                Some(error) => error.clone(),
+                None => input
+                    .tool_response
+                    .as_ref()
+                    .map(output_of)
+                    .unwrap_or_default(),
             };
-            Action::Post {
-                kind: format!(
-                    "{}.{}",
-                    agent.name(),
-                    if failed { "tool_failure" } else { "tool" }
-                ),
-                title: one_line(
-                    &format!(
-                        "{name}: {tool} {}",
-                        if failed { "failed" } else { "completed" }
-                    ),
-                    MAX_TITLE,
-                ),
-                body: text(&format!(
-                    "{}\n\nResult:\n{result}",
-                    limited_text(&describe(input.tool_input.as_ref()), MAX_TEXT / 4)
-                )),
+            let target = summary(input.tool_input.as_ref(), input.cwd.as_deref());
+            let mut step = format!("{}{}", code(tool), if failed { " failed" } else { "" });
+            if !target.is_empty() {
+                step.push_str(&format!(" · {}", code(&target)));
+            }
+            let detail = if result.trim().is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "{}\n{}",
+                    if failed { "Error:" } else { "Last result:" },
+                    fenced(&limited_text(result.trim(), MAX_RESULT))
+                )
+            };
+            Action::Activity {
+                title: format!("{name} is working"),
+                step: Some(step),
+                detail,
                 subject,
             }
         }
@@ -376,35 +375,14 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
             body: text(input.message.as_deref().unwrap_or_default()),
             subject,
         },
-        Event::Stop | Event::SubagentStop => Action::Post {
-            kind: format!(
-                "{}.{}",
-                agent.name(),
-                if event == Event::Stop {
-                    "stop"
-                } else {
-                    "subagent"
-                }
-            ),
+        Event::Stop | Event::SubagentStop => Action::Activity {
             title: if event == Event::Stop {
                 format!("{name} finished")
             } else {
-                format!("{name} subagent finished")
+                format!("{name}: a subagent finished")
             },
-            body: text(input.last_assistant_message.as_deref().unwrap_or_default()),
-            subject,
-        },
-        Event::SessionStart | Event::SessionEnd => Action::Post {
-            kind: format!("{}.session", agent.name()),
-            title: format!(
-                "{name} session {}",
-                if event == Event::SessionStart {
-                    "started"
-                } else {
-                    "ended"
-                }
-            ),
-            body: String::new(),
+            step: None,
+            detail: text(input.last_assistant_message.as_deref().unwrap_or_default()),
             subject,
         },
     }
@@ -449,9 +427,95 @@ fn describe(input: Option<&Value>) -> String {
     }
 }
 
-/// A subject from a working directory, such as `project/yappr`. A subject
-/// is one word.
-fn subject_of(cwd: &str) -> String {
+/// The most input text in one recent step.
+const MAX_STEP: usize = 80;
+/// The most bytes of a tool result on the activity card.
+const MAX_RESULT: usize = 2 * 1024;
+
+/// The text output of a tool: a text result, or the stdout and stderr of a
+/// command. Other results, such as the content of a file that the tool
+/// read, are not shown.
+fn output_of(response: &Value) -> String {
+    match response {
+        Value::String(text) => text.clone(),
+        Value::Object(fields) => ["stdout", "stderr", "output"]
+            .iter()
+            .filter_map(|key| fields.get(*key).and_then(Value::as_str))
+            .map(str::trim_end)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// The main argument of a tool, on one line, such as the command or the
+/// file path. A path in the working directory `cwd` is relative.
+fn summary(input: Option<&Value>, cwd: Option<&str>) -> String {
+    let Some(input) = input else {
+        return String::new();
+    };
+    let main = [
+        "command",
+        "file_path",
+        "path",
+        "url",
+        "pattern",
+        "query",
+        "description",
+    ]
+    .iter()
+    .find_map(|key| input.get(key).and_then(Value::as_str))
+    .map(str::to_owned)
+    .or_else(|| {
+        input
+            .as_object()
+            .and_then(|o| o.values().find_map(Value::as_str))
+            .map(str::to_owned)
+    })
+    .unwrap_or_default();
+    let main = match cwd.map(|c| format!("{}/", c.trim_end_matches('/'))) {
+        Some(prefix) => main
+            .strip_prefix(&prefix)
+            .map(str::to_owned)
+            .unwrap_or(main),
+        None => main,
+    };
+    let line = main.lines().next().unwrap_or_default();
+    let mut out = one_line(line, MAX_STEP);
+    if out.len() < main.trim_end().len() {
+        out.push('…');
+    }
+    out
+}
+
+/// `text` as a Markdown code span.
+fn code(text: &str) -> String {
+    let ticks = "`".repeat(longest_run(text, '`') + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{ticks}{pad}{text}{pad}{ticks}")
+}
+
+/// `text` as a fenced Markdown code block.
+fn fenced(text: &str) -> String {
+    let fence = "`".repeat((longest_run(text, '`') + 1).max(3));
+    format!("{fence}\n{text}\n{fence}")
+}
+
+fn longest_run(text: &str, c: char) -> usize {
+    text.split(|x| x != c).map(str::len).max().unwrap_or(0)
+}
+
+/// The subject of an agent in a working directory, such as `claude/yappr`.
+/// A subject is one word.
+fn subject_of(agent: Agent, cwd: Option<&str>) -> String {
+    let Some(cwd) = cwd else {
+        return agent.name().to_owned();
+    };
     let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(cwd);
     let word: String = name
         .chars()
@@ -464,7 +528,11 @@ fn subject_of(cwd: &str) -> String {
         })
         .take(200)
         .collect();
-    format!("project/{}", if word.is_empty() { "-" } else { &word })
+    format!(
+        "{}/{}",
+        agent.name(),
+        if word.is_empty() { "-" } else { &word }
+    )
 }
 
 /// `text` with at most [`MAX_TEXT`] bytes and with no control characters
@@ -570,19 +638,25 @@ mod tests {
             panic!("{action:?}")
         };
         assert_eq!(event, Event::PermissionRequest);
-        assert_eq!(title, "Claude: Bash");
+        assert_eq!(title, "Claude asks to use Bash");
         assert_eq!(body, "rm -rf build/\u{fffd}[2J");
-        assert_eq!(subject.as_deref(), Some("project/my-project"));
+        assert_eq!(subject, "claude/my-project");
     }
 
     #[test]
-    fn other_events_become_posts_and_unknown_events_do_nothing() {
+    fn stops_update_the_activity_card_and_unknown_events_do_nothing() {
         let stop = plan(
             Agent::Codex,
             &input(json!({"hook_event_name": "Stop", "last_assistant_message": "Done."})),
         );
-        assert!(
-            matches!(stop, Action::Post { ref kind, ref body, .. } if kind == "codex.stop" && body == "Done.")
+        assert_eq!(
+            stop,
+            Action::Activity {
+                title: "Codex finished".into(),
+                step: None,
+                detail: "Done.".into(),
+                subject: "codex".into(),
+            }
         );
         let long = "x".repeat(MAX_TEXT * 2);
         let Action::Post { body, .. } = plan(
@@ -622,11 +696,12 @@ mod tests {
 
     #[test]
     fn events_parse_with_tool_matchers() {
-        let events = parse_events("permission, pretooluse:Bash, session").unwrap();
-        assert_eq!(events.len(), 4);
+        let events = parse_events("permission, pretooluse:Bash, subagent").unwrap();
+        assert_eq!(events.len(), 3);
         assert_eq!(events[1].matcher.as_deref(), Some("Bash"));
         assert!(parse_events("pretooluse").is_err());
         assert!(parse_events("loud").is_err());
+        assert!(parse_events("session").is_err());
     }
 
     #[test]
@@ -764,31 +839,31 @@ mod tests {
     }
 
     #[test]
-    fn completed_tools_include_the_command_and_result_without_a_decision() {
-        for (agent, event, response, error, kind, title) in [
+    fn completed_tools_add_a_step_and_the_result_to_the_activity_card() {
+        for (agent, event, response, error, step, result) in [
             (
                 Agent::Claude,
                 "PostToolUse",
                 json!({"stdout": "3 passed"}),
                 None,
-                "claude.tool",
-                "Claude: Bash completed",
+                "`Bash` · `cargo test`",
+                "Last result:",
             ),
             (
                 Agent::Codex,
                 "PostToolUse",
                 json!("Exit code: 1\n1 failed"),
                 None,
-                "codex.tool",
-                "Codex: Bash completed",
+                "`Bash` · `cargo test`",
+                "1 failed",
             ),
             (
                 Agent::Claude,
                 "PostToolUseFailure",
                 Value::Null,
                 Some("Exit code 1: failed"),
-                "claude.tool_failure",
-                "Claude: Bash failed",
+                "`Bash` failed · `cargo test`",
+                "Error:",
             ),
         ] {
             let action = plan(
@@ -798,28 +873,21 @@ mod tests {
                     "tool_input": {"command": "cargo test"}, "tool_response": response, "error": error,
                 })),
             );
-            let Action::Post {
-                kind: actual_kind,
-                title: actual_title,
-                body,
+            let Action::Activity {
+                title,
+                step: Some(actual_step),
+                detail,
                 subject,
             } = action
             else {
                 panic!("{action:?}")
             };
-            assert_eq!(actual_kind, kind);
-            assert_eq!(actual_title, title);
-            assert!(body.contains("cargo test"));
-            assert!(body.contains(if event == "PostToolUseFailure" {
-                "Exit code 1: failed"
-            } else if agent == Agent::Codex {
-                "1 failed"
-            } else {
-                "3 passed"
-            }));
-            assert_eq!(subject.as_deref(), Some("project/app"));
+            assert_eq!(title, format!("{} is working", agent.title()));
+            assert_eq!(actual_step, step);
+            assert!(detail.contains(result), "{detail}");
+            assert_eq!(subject, format!("{agent}/app"));
         }
-        let Action::Post { body, .. } = plan(
+        let Action::Activity { detail, .. } = plan(
             Agent::Claude,
             &input(json!({
                 "hook_event_name": "PostToolUse", "tool_response": "\u{1b}[31m".to_owned() + &"é".repeat(MAX_TEXT)
@@ -827,19 +895,45 @@ mod tests {
         ) else {
             panic!()
         };
-        assert!(body.len() <= MAX_TEXT && body.ends_with('…'));
-        assert!(!body.contains('\u{1b}'));
-        let Action::Post { body, .. } = plan(
-            Agent::Claude,
-            &input(json!({
-                "hook_event_name": "PostToolUse", "tool_input": {"content": "x".repeat(MAX_TEXT * 2)},
-                "tool_response": "The file was written.",
-            })),
-        ) else {
-            panic!()
-        };
-        assert!(body.contains("The file was written."));
-        assert!(body.len() <= MAX_TEXT);
+        assert!(detail.len() <= MAX_RESULT + 32 && detail.contains('…'));
+        assert!(!detail.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn steps_name_the_main_argument_on_one_line_as_code() {
+        for (input, step) in [
+            (
+                json!({"file_path": "/w/src/main.rs", "content": "x"}),
+                "`Write` · `/w/src/main.rs`",
+            ),
+            (
+                json!({"command": "echo `date`\nls"}),
+                "`Write` · ``echo `date`…``",
+            ),
+            (json!({}), "`Write`"),
+        ] {
+            let Action::Activity {
+                step: Some(actual), ..
+            } = plan(
+                Agent::Claude,
+                &self::input(
+                    json!({"hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": input}),
+                ),
+            )
+            else {
+                panic!()
+            };
+            assert_eq!(actual, step);
+        }
+        assert_eq!(fenced("a ``` b"), "````\na ``` b\n````");
+        assert_eq!(
+            output_of(&json!({"stdout": "ok\n", "stderr": "", "interrupted": false})),
+            "ok"
+        );
+        assert_eq!(
+            output_of(&json!({"type": "text", "file": {"content": "x"}})),
+            ""
+        );
     }
 
     #[test]

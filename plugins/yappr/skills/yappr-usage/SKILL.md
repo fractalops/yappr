@@ -75,4 +75,4 @@ Do not ask only in the terminal. Do not block on `yappr ask` either, because the
 3. Apply one decision. `wait` prints the selected value and exits 0. A rejected `approve` exits 7. If the user answers in the chat, run `yappr cancel <id>` before acting. If Yappr already saved a device answer, read it with `yappr wait <id>`. Ask the user to resolve any conflict before acting.
 4. Exit 6 means the question expired, and 8 means it was cancelled. Silence is never approval: do not do the action. Post one `--level warn` entry that says what is on hold, say the same in the terminal, and stop.
 
-The yappr plugin handles tool permission prompts.
+The separate yappr-hooks plugin handles tool permission prompts.

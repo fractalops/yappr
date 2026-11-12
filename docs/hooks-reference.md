@@ -31,8 +31,18 @@ codex plugin add yappr-hooks@yappr
 Codex runs new hooks only after you trust them. Start Codex and type `/hooks`. Trust the Yappr hooks.
 Do this again after each plugin update.
 
-If you used an older Yappr that wrote hooks into `~/.claude/settings.json` or `~/.codex/hooks.json`, remove those hooks.
-Otherwise, each request goes to your other device two times.
+If you installed hooks with Yappr 0.1.8, remove them before you install yappr-hooks.
+Delete the hook entries whose command contains `hook --agent` from the settings file where you installed them.
+Keep the other hooks in that file.
+
+| Scope | Claude Code | Codex |
+|---|---|---|
+| User | `~/.claude/settings.json` | `~/.codex/hooks.json` |
+| Project | `.claude/settings.json` | `.codex/hooks.json` |
+| Local | `.claude/settings.local.json` | |
+
+If you set `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, look in that directory for the user file.
+If you keep the old hooks, each request can go to your other device twice.
 
 To remove the hooks, remove the plugin: `claude plugin uninstall yappr-hooks@yappr` or `codex plugin remove yappr-hooks@yappr`.
 
@@ -71,7 +81,8 @@ You can also select tool steps for the card. See [Events](#events).
 
 ## When something fails
 
-The plugin never stops the agent. If Yappr is not installed, cannot reach your other device, or has an error, the agent continues as if the plugin is not there.
+If Yappr is missing or reports an error, the agent continues with its usual permission rules.
+If your device is unreachable, a request can wait until its timeout.
 
 - If Yappr is not installed, the plugin writes an install hint to stderr. Codex shows the hint as a warning.
 - If your other device is not reachable, the entry stays in the feed. `yappr start` or `yappr retry` delivers it later.

@@ -400,7 +400,7 @@ The private key persists in `secret.key`. `YAPPR_KEY` overrides that key. The ol
 ```sh
 yappr config
 yappr config --output json
-yappr config --name "Work Mac"
+yappr config --name "Laptop"
 yappr config --name ""
 yappr config --relay https://relay.example.com --relay https://relay2.example.com
 yappr config --default-relays

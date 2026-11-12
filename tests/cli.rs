@@ -1424,16 +1424,16 @@ fn config_shows_and_saves_feed_settings() {
         "https://relay2.example.com",
         "--no-mdns",
         "--name",
-        "Work Mac",
+        "Laptop",
     ]);
     let custom = serde_json::json!({
-        "name": "Work Mac",
+        "name": "Laptop",
         "relays": {"disabled": false, "urls": ["https://relay.example.com", "https://relay2.example.com"]},
         "mdns": false,
         "hooks": {},
     });
     assert_eq!(json(), custom);
-    assert_eq!(writer.run(["config"]), "Writer name: Work Mac\nRelays: https://relay.example.com, https://relay2.example.com\nLocal discovery: Off\nAgent approvals go to: the one device that receives this feed\nAgent approvals wait: 2m\nAgent events: permission,stop\nAgent hooks act: when you are away (screen locked, or idle for 2 minutes)\n");
+    assert_eq!(writer.run(["config"]), "Writer name: Laptop\nRelays: https://relay.example.com, https://relay2.example.com\nLocal discovery: Off\nAgent approvals go to: the one device that receives this feed\nAgent approvals wait: 2m\nAgent events: permission,stop\nAgent hooks act: when you are away (screen locked, or idle for 2 minutes)\n");
 
     writer.fail(["config", "--relay", "file:///tmp", "--name", "Other"]);
     writer.fail(["--no-relay", "config", "--default-relays"]);
@@ -1447,7 +1447,7 @@ fn config_shows_and_saves_feed_settings() {
         json()["relays"],
         serde_json::json!({"disabled": true, "urls": []})
     );
-    assert_eq!(json()["name"], "Work Mac");
+    assert_eq!(json()["name"], "Laptop");
     writer.run(["config", "--default-relays"]);
     assert_eq!(
         json()["relays"],

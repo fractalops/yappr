@@ -135,9 +135,9 @@ mod tests {
     #[test]
     fn override_is_saved_and_can_be_reset() {
         let dir = tempfile::tempdir().unwrap();
-        FeedConfig::update(dir.path(), |config| config.set_name("Work Mac")).unwrap();
-        assert_eq!(sender(dir.path(), "build").unwrap(), "Work Mac · build");
-        assert_eq!(label("Work Mac", "mac", "mac.local"), "Work Mac");
+        FeedConfig::update(dir.path(), |config| config.set_name("Laptop")).unwrap();
+        assert_eq!(sender(dir.path(), "build").unwrap(), "Laptop · build");
+        assert_eq!(label("Laptop", "mac", "mac.local"), "Laptop");
         assert!(FeedConfig::update(dir.path(), |config| config.set_name("bad\nname")).is_err());
         FeedConfig::update(dir.path(), |config| config.set_name("")).unwrap();
         assert_eq!(

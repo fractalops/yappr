@@ -1060,7 +1060,7 @@ mod writer {
         fn declarative_question_uses_the_signed_sender_and_exact_url() {
             let (dir, store, device) = store_with_receiver();
             let store = store.signed_by(iroh::SecretKey::generate());
-            crate::config::FeedConfig::update(dir.path(), |config| config.set_name("Work Mac"))
+            crate::config::FeedConfig::update(dir.path(), |config| config.set_name("Laptop"))
                 .unwrap();
             let mut subscription = keys().0;
             subscription.app_url = Some("https://example.test/preview/".into());
@@ -1080,7 +1080,7 @@ mod writer {
             )
             .unwrap();
             let entry = store.entries().unwrap().pop().unwrap();
-            assert_eq!(entry.extra["sender"], "Work Mac · build");
+            assert_eq!(entry.extra["sender"], "Laptop · build");
             let pending = claim(
                 &store,
                 device,
@@ -1097,7 +1097,7 @@ mod writer {
             assert_eq!(push["notification"]["title"], push["title"]);
             assert_eq!(
                 push["notification"]["body"],
-                "Work Mac · build\nApproval: Approve or Reject\nReady."
+                "Laptop · build\nApproval: Approve or Reject\nReady."
             );
             assert_eq!(push["notification"]["tag"], question.id);
             let url = Url::parse(push["notification"]["navigate"].as_str().unwrap()).unwrap();

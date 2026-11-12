@@ -153,8 +153,8 @@ pub(super) enum Commands {
         receives: bool,
     },
 
-    /// Handle one hook event of a coding agent. The yappr plugin of the agent
-    /// runs this command and gives the event as JSON on stdin.
+    /// Handle one hook event of a coding agent. The yappr-hooks plugin runs
+    /// this command and gives the event as JSON on stdin.
     #[clap(hide = true)]
     Hook(HookArgs),
 
@@ -270,11 +270,11 @@ pub(super) enum Commands {
         /// Find and announce endpoints on the local network (mDNS).
         #[clap(long)]
         mdns: bool,
-        #[clap(flatten)]
-        hooks: HookConfigArgs,
         /// The output format.
         #[clap(long, value_enum, default_value = "text")]
         output: Format,
+        #[clap(flatten)]
+        hooks: HookConfigArgs,
     },
     /// Probe a writer and print its connection health.
     Health {
@@ -406,6 +406,7 @@ pub(super) struct ApprovalArgs {
 /// The agent hook settings of `yappr config`. An empty value restores the
 /// default.
 #[derive(clap::Args, Debug, Default)]
+#[command(next_help_heading = "Agent hooks (experimental)")]
 pub(super) struct HookConfigArgs {
     /// The device that answers agent approvals. The default is the one device
     /// that receives this feed.

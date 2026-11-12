@@ -1,8 +1,14 @@
-# Agent hooks
+# Agent hooks (experimental)
 
-The yappr plugin connects Claude Code and Codex to your phone.
+> [!WARNING]
+> Agent hooks are experimental. Their behavior and settings can change in any release.
+
+The yappr-hooks plugin connects Claude Code and Codex to your phone.
 When you are away from the computer, the agent asks your phone for permission, and your phone shows when the agent finishes.
 When you are at the computer, the plugin does nothing. The agent works as it does without the plugin.
+
+yappr-hooks is separate from the yappr plugin. The yappr plugin has no hooks. It lets the agent send updates and ask questions when the agent decides to.
+You can install one plugin, or both.
 
 ## Install
 
@@ -12,14 +18,14 @@ For Claude Code:
 
 ```sh
 claude plugin marketplace add fractalops/yappr
-claude plugin install yappr@yappr
+claude plugin install yappr-hooks@yappr
 ```
 
 For Codex:
 
 ```sh
 codex plugin marketplace add fractalops/yappr
-codex plugin add yappr@yappr
+codex plugin add yappr-hooks@yappr
 ```
 
 Codex runs new hooks only after you trust them. Start Codex and type `/hooks`. Trust the Yappr hooks.
@@ -27,6 +33,8 @@ Do this again after each plugin update.
 
 If you used an older Yappr that wrote hooks into `~/.claude/settings.json` or `~/.codex/hooks.json`, remove those hooks.
 Otherwise, each request goes to your phone two times.
+
+To remove the hooks, remove the plugin: `claude plugin uninstall yappr-hooks@yappr` or `codex plugin remove yappr-hooks@yappr`.
 
 ## How it works
 
@@ -94,7 +102,7 @@ yappr config --hook-to "" --hook-timeout "" --hook-events "" --hook-when ""
 If several devices can answer, set `--hook-to`.
 
 Claude Code has plugin options with the same settings: **Device**, **Approval wait**, **Events**, **When**, and **Feed**.
-Use `/plugin configure yappr@yappr` to set them, then restart Claude Code.
+Use `/plugin configure yappr-hooks@yappr` to set them, then restart Claude Code.
 A plugin option replaces the `yappr config` setting. An empty option keeps the `yappr config` setting.
 
 Codex has no plugin options. Use `yappr config`, or set these environment variables before you start Codex:

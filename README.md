@@ -108,8 +108,8 @@ question expires, you cancel it, or an error occurs.
 
 ## Coding agents
 
-The yappr plugin sends permission requests from Claude Code and Codex to your phone while you are away from the computer.
-At the computer, the agent works as usual.
+The yappr plugin lets Claude Code and Codex send you updates and ask you questions on your phone.
+Install Yappr first, then install the plugin for your agent.
 
 For Claude Code:
 
@@ -125,11 +125,8 @@ codex plugin marketplace add fractalops/yappr
 codex plugin add yappr@yappr
 ```
 
-> [!TIP]
-> Codex runs new hooks only after you trust them. Start Codex and type `/hooks`.
-> Trust the Yappr hooks when Codex asks for review.
-
-See [Agent hooks](docs/hooks-reference.md) for how it works and how to change it.
+The agent uses the plugin only when it decides to send an update or to ask you a question.
+To also send permission requests to your phone while you are away, see [agent hooks](docs/hooks-reference.md). Agent hooks are experimental.
 
 ## Reference
 

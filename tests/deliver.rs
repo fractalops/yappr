@@ -761,9 +761,12 @@ async fn yappr_hook(
     child.wait_with_output().await.unwrap()
 }
 
+/// The plugin with the agent hooks.
+const HOOKS_PLUGIN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/yappr-hooks");
+
 /// The handler of `event` in the plugin hook file of `agent`.
 fn plugin_handler(agent: &str, event: &str) -> serde_json::Value {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("hooks/{agent}.json"));
+    let path = std::path::Path::new(HOOKS_PLUGIN).join(format!("hooks/{agent}.json"));
     let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     hooks["hooks"][event][0]["hooks"][0].clone()
 }
@@ -779,7 +782,7 @@ async fn plugin_hook(
     env: &[(&str, &str)],
 ) -> std::process::Output {
     use tokio::io::AsyncWriteExt;
-    let root = env!("CARGO_MANIFEST_DIR");
+    let root = HOOKS_PLUGIN;
     let handler = plugin_handler(agent, event);
     let command = handler["command"].as_str().unwrap();
     let mut process = match handler.get("args") {
@@ -1128,7 +1131,8 @@ fn plugin_hook_files_cover_every_event_and_outlast_the_wait() {
     ];
     for agent in ["claude", "codex"] {
         let hooks: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join(format!("hooks/{agent}.json"))).unwrap(),
+            &std::fs::read(std::path::Path::new(HOOKS_PLUGIN).join(format!("hooks/{agent}.json")))
+                .unwrap(),
         )
         .unwrap();
         let events: Vec<&String> = hooks["hooks"].as_object().unwrap().keys().collect();
@@ -1152,10 +1156,24 @@ fn plugin_hook_files_cover_every_event_and_outlast_the_wait() {
             assert!(yappr::hooks::MAX_WAIT.as_secs() < yappr::hooks::ASK_HOOK_TIMEOUT);
         }
     }
-    let codex: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join(".codex-plugin/plugin.json")).unwrap())
-            .unwrap();
-    assert_eq!(codex["version"], env!("CARGO_PKG_VERSION"));
+    // Each plugin has the version of yappr.
+    for plugin in ["yappr", "yappr-hooks"] {
+        for manifest in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"] {
+            let path = root.join("plugins").join(plugin).join(manifest);
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(json["version"], env!("CARGO_PKG_VERSION"), "{path:?}");
+        }
+    }
+    // Only yappr-hooks has hooks.
+    for agent in ["claude", "codex"] {
+        let skill = root.join("plugins/yappr");
+        assert!(!skill.join("hooks").exists());
+        let manifest = skill.join(format!(".{agent}-plugin/plugin.json"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+        assert!(json.get("hooks").is_none(), "{agent}");
+    }
 }
 
 #[cfg(unix)]
@@ -1163,7 +1181,7 @@ fn plugin_hook_files_cover_every_event_and_outlast_the_wait() {
 async fn the_launcher_without_yappr_gives_a_hint_and_no_decision() {
     let empty = tempfile::tempdir().unwrap();
     let out = tokio::process::Command::new("sh")
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/yappr-hook"))
+        .arg(std::path::Path::new(HOOKS_PLUGIN).join("scripts/yappr-hook"))
         .arg("claude")
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", empty.path())

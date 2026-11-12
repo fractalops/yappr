@@ -1,17 +1,16 @@
 {
-  "name": "yappr",
+  "name": "yappr-hooks",
   "version": "0.1.8",
-  "description": "Approve agent tool requests and get turn updates on your phone with yappr.",
+  "description": "Experimental. Sends agent permission requests to your phone while you are away from the computer.",
   "author": {
     "name": "fractalops"
   },
   "repository": "https://github.com/fractalops/yappr",
   "license": "MIT OR Apache-2.0",
   "hooks": "./hooks/codex.json",
-  "skills": "./skills/",
   "interface": {
-    "displayName": "yappr",
-    "shortDescription": "Agent approvals on your phone",
+    "displayName": "yappr hooks (experimental)",
+    "shortDescription": "Experimental: agent approvals on your phone",
     "developerName": "fractalops",
     "category": "Developer Tools"
   }

@@ -141,8 +141,14 @@ fn update_hooks(
             None => None,
         };
     }
-    if let Some(when) = args.hook_when {
-        settings.when = Some(when);
+    if let Some(when) = set(args.hook_when) {
+        settings.when = match when {
+            Some(text) => Some(
+                <yappr::config::HookWhen as clap::ValueEnum>::from_str(&text, true)
+                    .map_err(|_| Usage("--hook-when: use away or always".into()))?,
+            ),
+            None => None,
+        };
     }
     if let Some(events) = set(args.hook_events) {
         if let Some(text) = &events {

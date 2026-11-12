@@ -26,7 +26,7 @@ If the CLI or a receiving peer is missing, explain the setup. Install, pair, or 
 - To install, see the [Yappr README](https://github.com/fractalops/yappr#install).
 - To pair, have the user run `yappr start --pair` in their terminal. On the phone, open [yappr.run](https://yappr.run/), select **Setup**, scan the code, and select **Request pairing**. Compare the two check codes. Enter `y` in the terminal if they match, or `n` if they differ. Use the alias printed after pairing.
 - Send a test post and check that it arrived. A paired receiver can receive while `yappr start` is stopped. Keep the receiver open for live updates and questions.
-- The agent plugin is optional. If the user asks to send tool permission prompts to the device, see [coding agents](https://github.com/fractalops/yappr#coding-agents).
+- The agent plugin is optional. If the user asks to send tool permission prompts to the device, see [coding agents](https://github.com/fractalops/yappr/blob/main/docs/hooks-reference.md).
 
 ## 2. Post updates
 

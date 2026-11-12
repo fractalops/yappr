@@ -108,8 +108,8 @@ question expires, you cancel it, or an error occurs.
 
 ## Coding agents
 
-Yappr sends approval requests and updates from Claude Code and Codex to your phone.
-Install Yappr first, then install the yappr plugin for your agent.
+The yappr plugin sends permission requests from Claude Code and Codex to your phone while you are away from the computer.
+At the computer, the agent works as usual.
 
 For Claude Code:
 
@@ -129,52 +129,7 @@ codex plugin add yappr@yappr
 > Codex runs new hooks only after you trust them. Start Codex and type `/hooks`.
 > Trust the Yappr hooks when Codex asks for review.
 
-The plugin acts only when you are away from the computer. You are away when you
-lock the screen, or after 2 minutes with no keyboard or mouse input. At the computer, the agent
-asks in the terminal as usual, and nothing goes to your phone. If Yappr cannot tell,
-such as over SSH, it acts as if you are at the computer.
-
-When you are away, the plugin asks the device that receives this feed to approve
-permission requests. Each agent has one card per project on your phone. The card
-shows what the agent did, and the agent's last message when its turn ends.
-Without an answer in time, the agent uses its normal terminal prompt.
-If you come back to the computer first, the request on your phone stops and
-the agent asks in the terminal.
-Claude Code can show that prompt while Yappr waits.
-The plugin also gives the agent a skill to send updates and ask you questions.
-
-To change what the plugin does, use `yappr config`:
-
-```sh
-# Ask the phone, and wait 5 minutes for an answer
-yappr config --hook-to phone --hook-timeout 5m
-
-# Also ask before pushing, and show test results on the card
-yappr config --hook-events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
-
-# Act also when you are at the computer
-yappr config --hook-when always
-```
-
-The default events are `permission,stop`. `--hook-events` replaces this selection.
-In Claude Code, the plugin options replace these settings.
-
-> [!TIP]
-> `--hook-events` accepts `event[:matcher[:command-pattern]]` entries.
-> Patterns use `*` for any text and `?` for one character. Repeat an event with
-> different patterns to match any of them. See [command filters](docs/reference.md#command-filters) for details.
-
-Hook support in Yappr: ☑ supported, ☐ unsupported.
-
-| Hook | Agent | What Yappr does |
-|---|---|---|
-| ☑ `PermissionRequest` | Claude Code, Codex | Shows an approval request on your phone and returns your decision to the agent |
-| ☑ `Stop` | Claude Code, Codex | Shows the agent's last message on its card when its turn ends |
-| ☑ `PreToolUse` | Claude Code, Codex | Asks for approval before each matching tool runs |
-| ☑ `Notification` | Claude Code | Sends the agent's notification message to your phone |
-| ☑ `SubagentStop` | Claude Code, Codex | Shows the subagent's last message on the card |
-| ☑ `PostToolUse` | Claude Code, Codex | Adds the tool and its main argument to the card, with the command output |
-| ☑ `PostToolUseFailure` | Claude Code | Adds the failed tool and its error to the card |
+See [Agent hooks](docs/hooks-reference.md) for how it works and how to change it.
 
 ## Reference
 

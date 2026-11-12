@@ -1076,10 +1076,13 @@ async fn config_saves_and_clears_the_hook_settings() {
         "5m",
         "--hook-events",
         "permission,subagent",
+        "--hook-when",
+        "Always",
     ])
     .await;
     assert!(out.status.success(), "{out:?}");
     let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("Agent hooks act: always"), "{text}");
     assert!(text.contains("Agent approvals go to: phone"), "{text}");
     assert!(text.contains("Agent approvals wait: 5m"), "{text}");
     assert!(text.contains("Agent events: permission,subagent"), "{text}");
@@ -1087,6 +1090,7 @@ async fn config_saves_and_clears_the_hook_settings() {
         vec!["config", "--hook-to", "tablet"],
         vec!["config", "--hook-timeout", "2h"],
         vec!["config", "--hook-events", "loud"],
+        vec!["config", "--hook-when", "sometimes"],
     ] {
         let out = config(invalid.clone()).await;
         assert!(!out.status.success(), "{invalid:?}");
@@ -1098,6 +1102,8 @@ async fn config_saves_and_clears_the_hook_settings() {
         "--hook-timeout",
         "",
         "--hook-events",
+        "",
+        "--hook-when",
         "",
         "--output",
         "json",

@@ -241,116 +241,7 @@ Feed records use the `choices` extension with type `question`, `decision`, or `c
 
 ## Agent hooks
 
-The yappr plugins for Claude Code and Codex run `yappr hook` for each agent event.
-The [README](../README.md#coding-agents) shows how to install them.
-
-```sh
-yappr config --hook-to phone --hook-timeout 5m
-yappr config --hook-events 'permission,stop,pretooluse:Bash:git push*,posttooluse:Bash:cargo test*'
-yappr config --hook-when always
-yappr config --hook-to "" --hook-timeout "" --hook-events ""
-```
-
-By default, the hooks act only when you are away: the screen is locked, or there was no keyboard or mouse input for 2 minutes.
-At the computer, a hook gives no decision and posts nothing, so the agent asks in the terminal.
-On macOS, Yappr reads the idle time and the lock state from `ioreg`. On Linux, it reads `LockedHint` and `IdleHint` of the graphical session from `loginctl`.
-`IdleHint` uses the idle time of the desktop, which can be longer than 2 minutes.
-Without a graphical session, such as over SSH, and on Windows, Yappr cannot tell. The hooks then act as at the computer.
-While a request waits for an answer, Yappr checks every 3 seconds whether you are back. If you are, it cancels the request and gives no decision, so the agent asks in the terminal.
-`--hook-when always` makes the hooks act at the computer too.
-
-`--hook-to DEVICE` selects the device that answers. Without it, the hook asks the one device that receives the feed.
-If several devices can answer, set `--hook-to`.
-`--hook-timeout DURATION` sets how long a request waits. Default: `2m`. Maximum: `59m`.
-An empty value restores the default.
-
-In Claude Code, the plugin options **Device**, **Approval wait**, **Events**, **When**, and **Feed** replace these settings.
-An empty option keeps the setting of `yappr config`.
-Run `claude plugin configure yappr@yappr` to list the options.
-In Claude Code, use `/plugin configure yappr@yappr` to set them.
-Restart Claude Code to apply changes.
-The hook also reads `YAPPR_HOOK_TO`, `YAPPR_HOOK_TIMEOUT`, `YAPPR_HOOK_EVENTS`, `YAPPR_HOOK_WHEN`, and `YAPPR_FEED`.
-
-The plugin finds `yappr` on `PATH`, then in `~/.cargo/bin`. `YAPPR_BIN` replaces this search.
-If it cannot find `yappr`, it writes an install hint to stderr and gives no decision.
-Codex shows the hint as a warning when it asks for permission.
-In Claude Code, start the CLI with `--debug-file FILE` to see hook stderr in that file.
-
-To test a custom binary in the Codex CLI, start a local session with
-`YAPPR_BIN=/path/to/yappr codex --no-daemon`.
-A shared server can use a different environment or version from the CLI.
-
-`--hook-events` selects the events. Default: `permission,stop`.
-
-| Event | Agent event | What yappr does |
-|---|---|---|
-| `permission` | `PermissionRequest` | Asks for approval and gives the decision to the agent |
-| `pretooluse:TOOL` | `PreToolUse` for a tool, such as `Bash` | Asks for approval before each matching tool runs |
-| `posttooluse[:TOOL]` | `PostToolUse` | Adds a step to the activity card, with the command output |
-| `posttoolusefailure[:TOOL]` | `PostToolUseFailure`, Claude Code only | Adds a failed step to the activity card, with the error |
-| `stop` | `Stop` | Shows the last message of the agent on the activity card |
-| `subagent` | `SubagentStop` | Shows the last message of the subagent on the activity card |
-| `notification` | `Notification`, Claude Code only | Posts `claude.notification`. It repeats permission requests and stops |
-
-The activity card is a `state` entry with the subject `AGENT/PROJECT`, such as `claude/yappr`. PROJECT is the name of the working directory.
-The app shows only the newest `state` entry of a subject, so each agent has one card per project. The titles name the project, such as "Claude finished in yappr".
-The card lists the last 5 steps: the tool and its main argument, such as the command or a path in the project.
-Below the steps, it shows the stdout and stderr of the last command, up to 2 KiB. It does not show other results, such as the content of a file that the tool read.
-If a shell command prints a file, the output can include the content of that file.
-After a stop, the next step starts a new list.
-
-A request shows the tool and its command on the device. Approval allows the tool, and rejection denies it.
-With no answer before the timeout, the hook gives no decision. The agent applies its normal permission rules.
-Claude Code can show its terminal prompt while Yappr waits. The prompt remains available after the timeout.
-A hook always exits 0 and writes errors to stderr. An error never blocks the agent.
-
-A hook that posts saves the entry and returns. Another process delivers it. If no device is reachable, `start` or `retry` delivers it later.
-Bodies longer than 8 KiB are cut.
-
-Hook input is limited to 1 MiB. Larger events can fail decoding and produce no question or update.
-Yappr reports the error on stderr and gives no approval decision.
-
-Codex runs new or changed hooks only after you trust them with `/hooks`. Without trust, Codex skips them and shows no error in `codex exec`.
-
-### Command filters
-
-Each event entry uses `event[:matcher[:command-pattern]]`. The matcher is a regular expression for the whole tool name, such as `Bash` or `Edit|Write`.
-For `pretooluse`, `posttooluse`, and `posttoolusefailure`, the third field filters `tool_input.command`.
-`PermissionRequest` does not accept a command pattern.
-
-```sh
-yappr config \
-  --hook-events 'permission,stop,posttooluse:Bash:cargo test*,posttooluse:Bash:cargo build*'
-```
-
-Patterns match the whole command text and are case-sensitive. `*` matches any text, including an empty string.
-`?` matches one character. All other characters match literally. Yappr does not interpret shell syntax.
-
-| Pattern | Matches | Does not match |
-|---|---|---|
-| `cargo test` | `cargo test` | `cargo test --release` |
-| `cargo test*` | `cargo test`, `cargo test --release` | `cd app && cargo test` |
-| `*cargo test*` | `cd app && cargo test` | `cargo build` |
-
-A command containing the pattern as quoted text can also match. For example, `*cargo test*` matches `echo "cargo test"`.
-These filters select hook actions by text. They do not identify every command that a shell can execute.
-
-Use one matcher per event. Combine tool names with `|`, such as `Bash|Read`.
-Repeat the same event and matcher to accept any listed command pattern. Overlapping patterns produce one hook action.
-Yappr rejects different matchers for the same event before it saves the settings.
-An entry without a command pattern accepts all calls for its matcher. Calls without a string `tool_input.command` do not match a command pattern.
-Other events keep their selected behavior. `--hook-events` replaces the default selection, so include `permission,stop` to keep them.
-
-Quote the `--hook-events` argument to protect spaces, wildcards, and `|` from the shell.
-The matcher can contain regex groups and character classes. Colons inside them stay in the matcher, such as `(?:Bash|Write)` or `[a:z]`.
-Escape a literal colon outside them as `\:`, such as `posttooluse:mcp__server\:tool`.
-The next unescaped colon outside groups and classes starts the command pattern.
-Further colons stay in the command pattern, so URLs and drive paths work.
-Commas separate event entries and cannot appear inside a matcher or command pattern. Each command pattern can contain at most 4096 bytes.
-
-`PostToolUse` adds a step to the activity card.
-Claude Code uses `PostToolUseFailure` for tool failures. Codex also reports unsuccessful Bash commands through `PostToolUse`.
-Yappr preserves the reported result and does not infer an exit code when the agent provides none.
+The yappr plugins for Claude Code and Codex run `yappr hook` for agent events. See [Agent hooks](hooks-reference.md).
 
 ## Pairing and access
 
@@ -523,7 +414,7 @@ yappr config --hook-to phone --hook-timeout 5m --hook-events permission,stop
 On other commands, `--relay`, `--no-relay`, and `--no-mdns` apply to that run.
 An empty writer name uses the computer name. `start --name` and `pair --name` set the name for one invitation.
 Restart `start` after a change to the relay or local discovery settings.
-The `--hook-*` options are described in [Agent hooks](#agent-hooks).
+The `--hook-*` options are described in [Agent hooks](hooks-reference.md#change-what-the-plugin-does).
 Custom URLs replace this device's home relays. Peers can advertise other relays.
 `--no-relay` requires a reachable direct path. Relays forward encrypted live traffic and cannot read it.
 They do not store entries for offline devices.

@@ -340,7 +340,7 @@ pub fn plan(agent: Agent, input: &Input) -> Action {
         },
         Event::PostToolUse | Event::PostToolUseFailure => {
             let failed = event == Event::PostToolUseFailure;
-            let target = summary(input.tool_input.as_ref(), input.cwd.as_deref());
+            let target = summary(tool, input.tool_input.as_ref(), input.cwd.as_deref());
             let mut step = format!("{}{}", code(tool), if failed { " failed" } else { "" });
             if !target.is_empty() {
                 step.push_str(&format!(" · {}", code(&target)));
@@ -459,29 +459,32 @@ fn output_of(response: &Value) -> String {
 
 /// The main argument of a tool, on one line, such as the command or the
 /// file path. A path in the working directory `cwd` is relative.
-fn summary(input: Option<&Value>, cwd: Option<&str>) -> String {
+fn summary(tool: &str, input: Option<&Value>, cwd: Option<&str>) -> String {
     let Some(input) = input else {
         return String::new();
     };
-    let main = [
-        "command",
-        "cmd",
-        "file_path",
-        "path",
-        "url",
-        "pattern",
-        "query",
-        "description",
-    ]
-    .iter()
-    .find_map(|key| input.get(key).and_then(Value::as_str))
-    .map(str::to_owned)
+    let field = |key| input.get(key).and_then(Value::as_str);
+    let main = if tool == "apply_patch" {
+        field("command")
+            .or_else(|| field("patch"))
+            .and_then(patch_path)
+    } else {
+        [
+            "command",
+            "cmd",
+            "file_path",
+            "path",
+            "url",
+            "pattern",
+            "query",
+            "description",
+        ]
+        .into_iter()
+        .find_map(field)
+    }
     .unwrap_or_default();
     let main = match cwd.map(|c| format!("{}/", c.trim_end_matches('/'))) {
-        Some(prefix) => main
-            .strip_prefix(&prefix)
-            .map(str::to_owned)
-            .unwrap_or(main),
+        Some(prefix) => main.strip_prefix(&prefix).unwrap_or(main),
         None => main,
     };
     let line = main.lines().next().unwrap_or_default();
@@ -490,6 +493,19 @@ fn summary(input: Option<&Value>, cwd: Option<&str>) -> String {
         out.push('…');
     }
     out
+}
+
+/// The first file named in a patch. Do not show the patch itself.
+fn patch_path(patch: &str) -> Option<&str> {
+    let mut lines = patch.lines();
+    if lines.next()? != "*** Begin Patch" {
+        return None;
+    }
+    lines.find_map(|line| {
+        ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
+            .into_iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+    })
 }
 
 /// `text` as a Markdown code span.
@@ -921,6 +937,13 @@ mod tests {
                 json!({"patch": "private content"}),
                 json!({"output": "private content"}),
                 "`apply_patch`",
+            ),
+            (
+                Agent::Codex,
+                "apply_patch",
+                json!({"command": "*** Begin Patch\n*** Add File: /work/app/fixture.txt\n+private content\n*** End Patch"}),
+                json!("private content"),
+                "`apply_patch` · `fixture.txt`",
             ),
         ] {
             let Action::Activity { step, detail, .. } = plan(

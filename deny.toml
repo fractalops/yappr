@@ -13,6 +13,9 @@ ignore = [
     # Unmaintained, with no known hole. netwatch uses it through
     # netlink-packet-core.
     { id = "RUSTSEC-2024-0436", reason = "paste comes through iroh and has no fix" },
+    # Unmaintained, with no known hole. netwatch uses it through wmi
+    # (Windows only).
+    { id = "RUSTSEC-2026-0543", reason = "chrono comes through iroh and has no fix" },
 ]
 
 [licenses]
